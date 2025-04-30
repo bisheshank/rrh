@@ -65,6 +65,7 @@ fn exchange_versions(stream: &mut TcpStream) -> Result<()> {
 
     let version_string = format!("{}\r\n", PROTOCOL_VERSION);
     stream.write_all(version_string.as_bytes())?;
+    stream.flush()?;
 
     debug!("Sent version string");
 

@@ -4,11 +4,12 @@ use crate::{
     constants::PROTOCOL_VERSION,
     error::{Result, SSHError},
 };
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::net::TcpStream;
 
 pub struct Client {
-    stream: TcpStream,
+    reader: BufReader<TcpStream>,
+    writer: BufWriter<TcpStream>,
     server_version: String,
 }
 
@@ -17,9 +18,12 @@ impl Client {
         info!("Connecting to {}", addr);
 
         let stream = TcpStream::connect(addr)?;
+        let reader = BufReader::new(stream.try_clone()?);
+        let writer = BufWriter::new(stream);
 
         let mut client = Client {
-            stream,
+            reader,
+            writer,
             server_version: String::new(),
         };
 
@@ -32,13 +36,13 @@ impl Client {
         debug!("Exchanging versions");
 
         let version_string = format!("{}\r\n", PROTOCOL_VERSION);
-        self.stream.write_all(version_string.as_bytes())?;
+        self.writer.write_all(version_string.as_bytes())?;
+        self.writer.flush()?;
 
         debug!("Sent version string");
 
-        let mut reader = BufReader::new(&self.stream);
         let mut line = String::new();
-        reader.read_line(&mut line)?;
+        self.reader.read_line(&mut line)?;
 
         debug!("Received version string");
 
