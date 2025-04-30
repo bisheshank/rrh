@@ -11,6 +11,10 @@ pub enum SSHError {
     // Io error
     #[error("Io: {0}")]
     Io(#[from] io::Error),
+
+    // Protocol error
+    #[error("Protocol: {0}")]
+    Protocol(String),
 }
 
 pub type Result<T> = std::result::Result<T, SSHError>;

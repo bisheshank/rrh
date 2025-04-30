@@ -1,5 +1,11 @@
-use crate::error::Result;
+use log::{debug, info};
+
+use crate::{
+    constants::PROTOCOL_VERSION,
+    error::{Result, SSHError},
+};
 use std::{
+    io::{BufRead, BufReader, Write},
     net::{TcpListener, TcpStream},
     thread,
 };
@@ -10,7 +16,7 @@ pub struct Server {
 
 impl Server {
     pub fn listen(addr: &str) -> Result<Self> {
-        println!("Listening on {}", addr);
+        info!("Listening on {}", addr);
 
         let listener = TcpListener::bind(addr)?;
 
@@ -20,13 +26,13 @@ impl Server {
     }
 
     pub fn run(&self) -> Result<()> {
-        println!("Server running, waiting for connections...");
+        info!("Server running, waiting for connections...");
 
         for stream in self.listener.incoming() {
             match stream {
                 Ok(stream) => {
                     let peer_addr = stream.peer_addr()?;
-                    println!("New connection from {}", peer_addr);
+                    info!("New connection from {}", peer_addr);
 
                     // Handle each one in a new thread
                     thread::spawn(move || {
@@ -55,5 +61,29 @@ fn handle_client(mut stream: TcpStream) -> Result<()> {
 }
 
 fn exchange_versions(stream: &mut TcpStream) -> Result<()> {
+    debug!("Exchanging versions");
+
+    let version_string = format!("{}\r\n", PROTOCOL_VERSION);
+    stream.write_all(version_string.as_bytes())?;
+
+    debug!("Sent version string");
+
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+
+    debug!("Received version string");
+
+    let client_version = line.trim_end().to_string();
+
+    if !client_version.starts_with("SSH-2.0") {
+        return Err(SSHError::Protocol(format!(
+            "Incompatible SSH version: {}",
+            client_version
+        )));
+    }
+
+    info!("Client version: {}", client_version);
+
     Ok(())
 }

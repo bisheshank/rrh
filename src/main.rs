@@ -1,6 +1,7 @@
 use std::env;
 use std::process;
 
+use log::info;
 use rrh::client::Client;
 use rrh::server::Server;
 
@@ -31,7 +32,7 @@ fn main() {
 
             match Client::connect(&address) {
                 Ok(_client) => {
-                    println!("Connected successfully!")
+                    info!("Connected successfully!")
 
                     // TODO: Continue with the key exchange
                 }
@@ -42,7 +43,7 @@ fn main() {
             }
         }
         "server" => {
-            println!("Running server, listening on {}", address);
+            info!("Running server, listening on {}", address);
 
             match Server::listen(&address) {
                 Ok(server) => {
@@ -58,7 +59,7 @@ fn main() {
             }
         }
         _ => {
-            println!("Unknown mode: {}", mode);
+            info!("Unknown mode: {}", mode);
             print_usage();
             process::exit(1);
         }
