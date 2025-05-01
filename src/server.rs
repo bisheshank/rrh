@@ -3,6 +3,7 @@ use log::{debug, info};
 use crate::{
     constants::PROTOCOL_VERSION,
     error::{Result, SSHError},
+    constants::msg::KEXINIT
 };
 use std::{
     io::{BufRead, BufReader, Write},
@@ -54,6 +55,7 @@ impl Server {
 fn handle_client(mut stream: TcpStream) -> Result<()> {
     // Exchange protocol versions
     exchange_versions(&mut stream)?;
+    kexinit_exchange(&mut stream)?;
 
     // TODO: Continue with key exchange, etc.
 
@@ -86,5 +88,34 @@ fn exchange_versions(stream: &mut TcpStream) -> Result<()> {
 
     info!("Client version: {}", client_version);
 
+    Ok(())
+}
+
+fn kexinit_exchange(stream: &mut TcpStream) -> Result<()> {
+    //want server to send kexinit message
+    debug!("Exchanging kexinit");
+
+    let kexinit_string = format!("{}\r\n", KEXINIT);
+    stream.write_all(kexinit_string.as_bytes())?;
+    stream.flush()?;
+
+    debug!("Sent kexinit string");
+
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+
+    debug!("Received kexinit string");
+
+    let client_kexinit = line.trim_end().to_string();
+
+    if !client_kexinit.starts_with("20") {
+        return Err(SSHError::Protocol(format!(
+            "Did not receive KEXINIT message: {}",
+            client_kexinit
+        )));
+    }
+
+    info!("KEXINIT: {}", client_kexinit);
     Ok(())
 }
