@@ -18,6 +18,12 @@ pub enum SshState {
     KexInitSent,
     KexInitReceived,
 
+    // Diffie-Hellman states
+    DhInitSent,      // Client only
+    DhReplyReceived, // Client only
+    DhInitReceived,  // Server only
+    DhReplySent,     // Server only
+
     // Authentication states
 
     // Connection states
@@ -38,6 +44,10 @@ impl fmt::Display for SshState {
             SshState::VersionExchanged => write!(f, "VersionExchanged"),
             SshState::KexInitSent => write!(f, "KexInitSent"),
             SshState::KexInitReceived => write!(f, "KexInitReceived"),
+            SshState::DhInitSent => write!(f, "DhInitSent"),
+            SshState::DhReplyReceived => write!(f, "DhReplyReceived"),
+            SshState::DhInitReceived => write!(f, "DhInitReceived"),
+            SshState::DhReplySent => write!(f, "DhReplySent"),
             SshState::ChannelOpening => write!(f, "ChannelOpening"),
             SshState::ChannelOpen => write!(f, "ChannelOpen"),
             SshState::SessionStarted => write!(f, "SessionStarted"),
@@ -54,6 +64,12 @@ pub enum SshEvent {
     ReceiveVersion,
     SendKexInit,
     ReceiveKexInit,
+
+    // Diffie-Hellman events
+    SendDhInit,     // Client only
+    ReceiveDhReply, // Client only
+    ReceiveDhInit,  // Server only
+    SendDhReply,    // Server only
 
     // Authentication events
 
@@ -72,6 +88,10 @@ impl fmt::Display for SshEvent {
             SshEvent::ReceiveVersion => write!(f, "ReceiveVersion"),
             SshEvent::SendKexInit => write!(f, "SendKexInit"),
             SshEvent::ReceiveKexInit => write!(f, "ReceiveKexInit"),
+            SshEvent::SendDhInit => write!(f, "SendDhInit"),
+            SshEvent::ReceiveDhReply => write!(f, "ReceiveDhReply"),
+            SshEvent::ReceiveDhInit => write!(f, "ReceiveDhInit"),
+            SshEvent::SendDhReply => write!(f, "SendDhReply"),
             SshEvent::OpenChannel => write!(f, "OpenChannel"),
             SshEvent::Error(msg) => write!(f, "Error({})", msg),
             SshEvent::Disconnect => write!(f, "Disconnect"),
@@ -129,9 +149,32 @@ impl SshStateMachine {
                 self.state = SshState::KexInitReceived;
             }
 
-            (SshState::KexInitSent, SshEvent::ReceiveKexInit) => {
+            // Key exchange transitions (client)
+            (SshState::KexInitSent, SshEvent::ReceiveKexInit) if self.is_client => {
                 self.receive_kexinit().await?;
                 self.state = SshState::KexInitReceived;
+            }
+            (SshState::KexInitReceived, SshEvent::SendDhInit) if self.is_client => {
+                self.send_dh_init().await?;
+                self.state = SshState::DhInitSent;
+            }
+            (SshState::DhInitSent, SshEvent::ReceiveDhReply) if self.is_client => {
+                self.receive_dh_reply().await?;
+                self.state = SshState::DhReplyReceived;
+            }
+
+            // Key exchange transitions (server)
+            (SshState::KexInitSent, SshEvent::ReceiveKexInit) if !self.is_client => {
+                self.receive_kexinit().await?;
+                self.state = SshState::KexInitReceived;
+            }
+            (SshState::KexInitReceived, SshEvent::ReceiveDhInit) if !self.is_client => {
+                self.receive_dh_init().await?;
+                self.state = SshState::DhInitReceived;
+            }
+            (SshState::DhInitReceived, SshEvent::SendDhReply) if !self.is_client => {
+                self.send_dh_reply().await?;
+                self.state = SshState::DhReplySent;
             }
 
             // Error and disconnect transitions
@@ -252,6 +295,74 @@ impl SshStateMachine {
         // TODO: Implement
 
         Ok(())
+    }
+
+    async fn send_dh_init(&mut self) -> SshResult<()> {
+        if !self.is_client {
+            return Err(SshError::Protocol(
+                "Only clients can send KEXDH_INIT".into(),
+            ));
+        }
+
+        println!("Sending KEXDH_INIT");
+
+        // TODO: Implement Diffie-Hellman key exchange
+        // This would generate a DH key pair, send public key
+
+        Err(SshError::NotImplemented(
+            "KEXDH_INIT not implemented".into(),
+        ))
+    }
+
+    async fn receive_dh_reply(&mut self) -> SshResult<()> {
+        if !self.is_client {
+            return Err(SshError::Protocol(
+                "Only clients can receive KEXDH_REPLY".into(),
+            ));
+        }
+
+        println!("Receiving KEXDH_REPLY");
+
+        // TODO: Implement DH key exchange completion
+        // This would process the server's reply, verify host key, compute shared secret
+
+        Err(SshError::NotImplemented(
+            "KEXDH_REPLY not implemented".into(),
+        ))
+    }
+
+    async fn receive_dh_init(&mut self) -> SshResult<()> {
+        if self.is_client {
+            return Err(SshError::Protocol(
+                "Only servers can receive KEXDH_INIT".into(),
+            ));
+        }
+
+        println!("Receiving KEXDH_INIT");
+
+        // TODO: Implement server-side DH key exchange
+        // This would receive client's public key
+
+        Err(SshError::NotImplemented(
+            "KEXDH_INIT receive not implemented".into(),
+        ))
+    }
+
+    async fn send_dh_reply(&mut self) -> SshResult<()> {
+        if self.is_client {
+            return Err(SshError::Protocol(
+                "Only servers can send KEXDH_REPLY".into(),
+            ));
+        }
+
+        println!("Sending KEXDH_REPLY");
+
+        // TODO: Implement server's DH reply
+        // This would sign and send the server's host key and public key
+
+        Err(SshError::NotImplemented(
+            "KEXDH_REPLY not implemented".into(),
+        ))
     }
 
     async fn disconnect(&mut self) -> SshResult<()> {
