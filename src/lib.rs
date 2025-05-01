@@ -1,5 +1,9 @@
 // Define and export the mods
 pub mod client;
+pub mod config;
 pub mod constants;
 pub mod error;
+pub mod message;
 pub mod server;
+pub mod state;
+pub mod transport;

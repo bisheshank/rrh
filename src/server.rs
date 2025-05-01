@@ -1,43 +1,38 @@
 use log::{debug, info};
 
 use crate::{
-    constants::PROTOCOL_VERSION,
-    error::{Result, SSHError},
+    config::SshConfig,
+    error::SshResult,
+    state::{SshEvent, SshStateMachine},
 };
 use std::{
-    io::{BufRead, BufReader, Write},
     net::{TcpListener, TcpStream},
     thread,
 };
 
-pub struct Server {
-    listener: TcpListener,
+pub struct SshServer {
+    config: SshConfig,
+    // Have different sessions
 }
 
-impl Server {
-    pub fn listen(addr: &str) -> Result<Self> {
-        info!("Listening on {}", addr);
-
-        let listener = TcpListener::bind(addr)?;
-
-        let server = Server { listener };
-
-        return Ok(server);
+impl SshServer {
+    pub fn new(config: SshConfig) -> Self {
+        SshServer { config }
     }
+    pub fn listen(&self, address: &str) -> SshResult<()> {
+        println!("Starting SSH server on {}", address);
 
-    pub fn run(&self) -> Result<()> {
-        info!("Server running, waiting for connections...");
+        let listener = TcpListener::bind(address)?;
 
-        for stream in self.listener.incoming() {
+        for stream in listener.incoming() {
             match stream {
                 Ok(stream) => {
-                    let peer_addr = stream.peer_addr()?;
-                    info!("New connection from {}", peer_addr);
+                    let config = self.config.clone();
 
-                    // Handle each one in a new thread
+                    // Handle each connection in a new thread
                     thread::spawn(move || {
-                        if let Err(e) = handle_client(stream) {
-                            eprintln!("Error handling client {}: {}", peer_addr, e)
+                        if let Err(e) = handle_connection(stream, config) {
+                            eprintln!("Error handling connection: {}", e);
                         }
                     });
                 }
@@ -51,40 +46,22 @@ impl Server {
     }
 }
 
-fn handle_client(mut stream: TcpStream) -> Result<()> {
-    // Exchange protocol versions
-    exchange_versions(&mut stream)?;
+/// Handles a client connection
+fn handle_connection(stream: TcpStream, config: SshConfig) -> SshResult<()> {
+    let peer_addr = stream.peer_addr()?;
+    println!("New connection from {}", peer_addr);
 
-    // TODO: Continue with key exchange, etc.
+    let mut state_machine = SshStateMachine::new(stream, config, false);
 
-    Ok(())
-}
+    // Start the connection process
+    state_machine.process_event(SshEvent::ReceiveVersion)?;
 
-fn exchange_versions(stream: &mut TcpStream) -> Result<()> {
-    debug!("Exchanging versions");
+    state_machine.process_event(SshEvent::SendKexInit)?;
+    state_machine.process_event(SshEvent::ReceiveKexInit)?;
 
-    let version_string = format!("{}\r\n", PROTOCOL_VERSION);
-    stream.write_all(version_string.as_bytes())?;
-    stream.flush()?;
+    println!("[{}] Version exchange completed", peer_addr);
 
-    debug!("Sent version string");
-
-    let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    reader.read_line(&mut line)?;
-
-    debug!("Received version string");
-
-    let client_version = line.trim_end().to_string();
-
-    if !client_version.starts_with("SSH-2.0") {
-        return Err(SSHError::Protocol(format!(
-            "Incompatible SSH version: {}",
-            client_version
-        )));
-    }
-
-    info!("Client version: {}", client_version);
+    // Complete the key exchange
 
     Ok(())
 }
