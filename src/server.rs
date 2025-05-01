@@ -55,9 +55,11 @@ impl Server {
 fn handle_client(mut stream: TcpStream) -> Result<()> {
     // Exchange protocol versions
     exchange_versions(&mut stream)?;
+
+    //exchange KEXINIT messages
     kexinit_exchange(&mut stream)?;
 
-    // TODO: Continue with key exchange, etc.
+    //need to start dh process
 
     Ok(())
 }
@@ -93,19 +95,19 @@ fn exchange_versions(stream: &mut TcpStream) -> Result<()> {
 
 fn kexinit_exchange(stream: &mut TcpStream) -> Result<()> {
     //want server to send kexinit message
-    debug!("Exchanging kexinit");
+    debug!("Sending KEXINIT message");
 
     let kexinit_string = format!("{}\r\n", KEXINIT);
     stream.write_all(kexinit_string.as_bytes())?;
     stream.flush()?;
 
-    debug!("Sent kexinit string");
+    debug!("Sent KEXINIT message");
 
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     reader.read_line(&mut line)?;
 
-    debug!("Received kexinit string");
+    debug!("Received KEXINIT message");
 
     let client_kexinit = line.trim_end().to_string();
 

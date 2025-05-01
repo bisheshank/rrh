@@ -29,8 +29,11 @@ impl Client {
         };
 
         client.exchange_versions()?;
-        client.kexinit_exchange()?;
 
+        //exchange KEXINIT messages
+        client.kexinit_exchange()?;
+        
+        //need to start dh process
         return Ok(client);
     }
 
@@ -64,18 +67,18 @@ impl Client {
 
     fn kexinit_exchange(&mut self) -> Result<()> {
         //want server to send kexinit message
-        debug!("Exchanging kexinit");
+        debug!("Sending KEXINIT message");
     
         let kexinit_string = format!("{}\r\n", KEXINIT);
         self.writer.write_all(kexinit_string.as_bytes())?;
         self.writer.flush()?;
     
-        debug!("Sent kexinit string");
+        debug!("Sent KEXINIT message");
     
         let mut line = String::new();
         self.reader.read_line(&mut line)?;
     
-        debug!("Received kexinit string");
+        debug!("Received KEXINIT message");
     
         let server_kexinit = line.trim_end().to_string();
     
