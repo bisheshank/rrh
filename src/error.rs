@@ -32,4 +32,3 @@ impl From<std::io::Error> for SshError {
 }
 
 pub type SshResult<T> = std::result::Result<T, SshError>;
-

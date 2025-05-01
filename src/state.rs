@@ -1,4 +1,4 @@
-use log::debug;
+use log::{debug, info};
 
 use core::fmt;
 use std::io::Write;
@@ -121,7 +121,7 @@ impl SshStateMachine {
     }
 
     pub async fn process_event(&mut self, event: SshEvent) -> SshResult<()> {
-        println!("Processing event {} in state {}", event, self.state);
+        info!("Processing event {} in state {}", event, self.state);
 
         // Handle state transitions
         match (self.state, &event) {
@@ -232,7 +232,7 @@ impl SshStateMachine {
         }
         .ok_or(SshError::MissingVersion)?;
 
-        println!("Sending version: {}", version);
+        info!("Sending version: {}", version);
 
         // Make sure to use \r\n as per RFC 4253
         let version_string = format!("{}\r\n", version);
@@ -268,7 +268,7 @@ impl SshStateMachine {
             )));
         }
 
-        println!("Received version: {}", remote_version);
+        info!("Received version: {}", remote_version);
 
         self.transport.config.remote_version = Some(remote_version.to_string());
 
@@ -282,7 +282,7 @@ impl SshStateMachine {
     }
 
     async fn send_kexinit(&mut self) -> SshResult<()> {
-        println!("Sending KEXINIT");
+        info!("Sending KEXINIT");
 
         // TODO: Implement
 
@@ -290,7 +290,7 @@ impl SshStateMachine {
     }
 
     async fn receive_kexinit(&mut self) -> SshResult<()> {
-        println!("Receiving KEXINIT");
+        info!("Receiving KEXINIT");
 
         // TODO: Implement
 
@@ -304,7 +304,7 @@ impl SshStateMachine {
             ));
         }
 
-        println!("Sending KEXDH_INIT");
+        info!("Sending KEXDH_INIT");
 
         // TODO: Implement Diffie-Hellman key exchange
         // This would generate a DH key pair, send public key
@@ -321,7 +321,7 @@ impl SshStateMachine {
             ));
         }
 
-        println!("Receiving KEXDH_REPLY");
+        info!("Receiving KEXDH_REPLY");
 
         // TODO: Implement DH key exchange completion
         // This would process the server's reply, verify host key, compute shared secret
@@ -338,7 +338,7 @@ impl SshStateMachine {
             ));
         }
 
-        println!("Receiving KEXDH_INIT");
+        info!("Receiving KEXDH_INIT");
 
         // TODO: Implement server-side DH key exchange
         // This would receive client's public key
@@ -355,7 +355,7 @@ impl SshStateMachine {
             ));
         }
 
-        println!("Sending KEXDH_REPLY");
+        info!("Sending KEXDH_REPLY");
 
         // TODO: Implement server's DH reply
         // This would sign and send the server's host key and public key
@@ -366,7 +366,7 @@ impl SshStateMachine {
     }
 
     async fn disconnect(&mut self) -> SshResult<()> {
-        println!("Disconnecting");
+        info!("Disconnecting");
 
         // TODO: Send disconnect message
 

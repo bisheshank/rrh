@@ -31,9 +31,16 @@ impl SshClient {
                 .await?;
         }
 
+        // Complete DH key exchange
+        state_machine.process_event(SshEvent::SendDhInit).await?;
+        state_machine
+            .process_event(SshEvent::ReceiveDhReply)
+            .await?;
+
         info!("Version exchange successful");
+
+        println!("Successfully connected to {}", address);
 
         Ok(Self { state_machine })
     }
 }
-
