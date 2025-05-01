@@ -1,9 +1,13 @@
+use log::debug;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader, split},
     net::TcpStream,
 };
 
-use crate::{config::SshConfig, error::SshResult};
+use crate::{
+    config::SshConfig,
+    error::{SshError, SshResult},
+};
 
 pub struct Transport {
     reader: BufReader<tokio::io::ReadHalf<TcpStream>>,
@@ -29,8 +33,19 @@ impl Transport {
     }
 
     pub async fn read_line(&mut self, line: &mut String) -> SshResult<()> {
-        self.reader.read_line(line).await?;
-        Ok(())
+        match self.reader.read_line(line).await {
+            Ok(bytes_read) => {
+                debug!("Read {} bytes: {:?}", bytes_read, line.as_bytes());
+                if bytes_read == 0 {
+                    return Err(SshError::Protocol("Connection closed by peer".to_string()));
+                }
+                Ok(())
+            }
+            Err(e) => {
+                debug!("Error reading line: {:?}", e);
+                Err(e.into())
+            }
+        }
     }
 
     pub async fn write_all(&mut self, buf: &[u8]) -> SshResult<()> {
@@ -43,4 +58,3 @@ impl Transport {
         self.is_client
     }
 }
-

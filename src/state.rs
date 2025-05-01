@@ -116,11 +116,20 @@ impl SshStateMachine {
             }
 
             // Version exchanged transitions
+            (SshState::VersionExchanged, SshEvent::SendVersion) => {
+                self.send_version().await?;
+                // No state change as we're already in VersionExchanged
+            }
             (SshState::VersionExchanged, SshEvent::SendKexInit) => {
                 self.send_kexinit().await?;
                 self.state = SshState::KexInitSent;
             }
             (SshState::VersionExchanged, SshEvent::ReceiveKexInit) => {
+                self.receive_kexinit().await?;
+                self.state = SshState::KexInitReceived;
+            }
+
+            (SshState::KexInitSent, SshEvent::ReceiveKexInit) => {
                 self.receive_kexinit().await?;
                 self.state = SshState::KexInitReceived;
             }
@@ -182,11 +191,12 @@ impl SshStateMachine {
 
         println!("Sending version: {}", version);
 
+        // Make sure to use \r\n as per RFC 4253
         let version_string = format!("{}\r\n", version);
         self.transport.write_all(version_string.as_bytes()).await?;
 
         // If we're the client, we need to receive the server's version
-        if self.is_client {
+        if self.is_client && self.transport.config.remote_version.is_none() {
             self.receive_version().await?;
         }
 
@@ -194,11 +204,19 @@ impl SshStateMachine {
     }
 
     async fn receive_version(&mut self) -> SshResult<()> {
-        // NOTE: Maybe change this, RFC specifes only accepts 255 byte strings
+        // NOTE: only accept 255 byte strings
+
         let mut remote_version = String::new();
         self.transport.read_line(&mut remote_version).await?;
 
-        debug!("Remote version bytes: {:?}", remote_version.as_bytes());
+        // Trim any whitespace, especially trailing \r\n
+        let remote_version = remote_version.trim();
+
+        if remote_version.is_empty() {
+            return Err(SshError::Protocol(
+                "Received empty version string".to_string(),
+            ));
+        }
 
         if !remote_version.starts_with("SSH-2.0") {
             return Err(SshError::Protocol(format!(
@@ -209,12 +227,12 @@ impl SshStateMachine {
 
         println!("Received version: {}", remote_version);
 
-        self.transport.config.remote_version = Some(remote_version.clone());
+        self.transport.config.remote_version = Some(remote_version.to_string());
 
         if self.is_client {
-            self.transport.config.server_version = Some(remote_version);
+            self.transport.config.server_version = Some(remote_version.to_string());
         } else {
-            self.transport.config.client_version = Some(remote_version);
+            self.transport.config.client_version = Some(remote_version.to_string());
         }
 
         Ok(())
