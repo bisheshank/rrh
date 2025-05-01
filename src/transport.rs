@@ -1,19 +1,29 @@
+use bytes::{BufMut, BytesMut};
 use log::debug;
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader, split},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, split},
     net::TcpStream,
 };
 
 use crate::{
     config::SshConfig,
+    constants::MAX_PACKET_SIZE,
     error::{SshError, SshResult},
+    message::Message,
+    ssh_codec::SshPacket,
 };
 
 pub struct Transport {
+    // All config values
+    pub config: SshConfig,
+    // TcpStream split into reader and writer
     reader: BufReader<tokio::io::ReadHalf<TcpStream>>,
     writer: tokio::io::WriteHalf<TcpStream>,
-    pub config: SshConfig,
+    // Client/ server differentiation
     is_client: bool,
+    // Packet sequencing
+    send_sequence_number: u32,
+    recv_sequence_number: u32,
 }
 
 impl Transport {
@@ -29,6 +39,8 @@ impl Transport {
             writer,
             config,
             is_client,
+            send_sequence_number: 0,
+            recv_sequence_number: 0,
         })
     }
 
@@ -56,5 +68,52 @@ impl Transport {
 
     pub fn is_client(&self) -> bool {
         self.is_client
+    }
+
+    pub async fn send_message(&mut self, message: Message) -> SshResult<()> {
+        debug!("Sending message: {}", message);
+
+        let mut packet = message.to_packet()?;
+        packet.sequence_number = self.send_sequence_number;
+        let data = packet.encode();
+
+        self.writer.write_all(&data).await?;
+        self.writer.flush().await?;
+
+        self.send_sequence_number = self.send_sequence_number.wrapping_add(1);
+
+        Ok(())
+    }
+
+    pub async fn receive_message(&mut self) -> SshResult<Message> {
+        let mut length_buf = [0u8; 4];
+        self.reader.read_exact(&mut length_buf).await?;
+
+        let packet_length = u32::from_be_bytes(length_buf);
+
+        if packet_length > MAX_PACKET_SIZE {
+            return Err(SshError::Protocol(format!(
+                "Packet too large: {} > {}",
+                packet_length, MAX_PACKET_SIZE
+            )));
+        }
+
+        let mut packet_buf = BytesMut::with_capacity(packet_length as usize);
+        packet_buf.resize(packet_length as usize, 0);
+        self.reader.read_exact(&mut packet_buf).await?;
+
+        let mut full_packet = BytesMut::with_capacity(4 + packet_length as usize);
+        full_packet.put_u32(packet_length);
+        full_packet.extend_from_slice(&packet_buf);
+
+        let mut packet = SshPacket::decode(full_packet.freeze())?;
+
+        packet.sequence_number = self.recv_sequence_number;
+        self.recv_sequence_number = self.recv_sequence_number.wrapping_add(1);
+
+        let message = Message::from_packet(&packet)?;
+        debug!("Received message: {}", message);
+
+        Ok(message)
     }
 }
