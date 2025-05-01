@@ -17,7 +17,7 @@ impl SshClient {
 
         let stream = TcpStream::connect(address)?;
 
-        let mut state_machine = SshStateMachine::new(stream, config, true);
+        let mut state_machine = SshStateMachine::new(stream, config, true)?;
 
         // 1. Version exchange
         // 2. Key exchange (KEXINIT, DH exchange, NEWKEYS)

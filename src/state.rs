@@ -1,3 +1,5 @@
+use log::debug;
+
 use core::fmt;
 use std::{io::Write, net::TcpStream};
 
@@ -83,14 +85,14 @@ pub struct SshStateMachine {
 }
 
 impl SshStateMachine {
-    pub fn new(stream: TcpStream, config: SshConfig, is_client: bool) -> Self {
-        let transport = Transport::new(stream, config, is_client);
+    pub fn new(stream: TcpStream, config: SshConfig, is_client: bool) -> SshResult<Self> {
+        let transport = Transport::new(stream, config, is_client)?;
 
-        SshStateMachine {
+        Ok(SshStateMachine {
             state: SshState::Initial,
             transport,
             is_client,
-        }
+        })
     }
 
     pub fn state(&self) -> SshState {
@@ -180,7 +182,7 @@ impl SshStateMachine {
         println!("Sending version: {}", version);
 
         let version_string = format!("{}\r\n", version);
-        self.transport.stream.write_all(version_string.as_bytes())?;
+        self.transport.write_all(version_string.as_bytes())?;
 
         // If we're the client, we need to receive the server's version
         if self.is_client {
@@ -194,6 +196,8 @@ impl SshStateMachine {
         // NOTE: Maybe change this, RFC specifes only accepts 255 byte strings
         let mut remote_version = String::new();
         self.transport.read_line(&mut remote_version)?;
+
+        debug!("Remote version bytes: {:?}", remote_version.as_bytes());
 
         if !remote_version.starts_with("SSH-2.0") {
             return Err(SshError::Protocol(format!(

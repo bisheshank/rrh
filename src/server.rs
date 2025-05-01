@@ -51,7 +51,7 @@ fn handle_connection(stream: TcpStream, config: SshConfig) -> SshResult<()> {
     let peer_addr = stream.peer_addr()?;
     println!("New connection from {}", peer_addr);
 
-    let mut state_machine = SshStateMachine::new(stream, config, false);
+    let mut state_machine = SshStateMachine::new(stream, config, false)?;
 
     // Start the connection process
     state_machine.process_event(SshEvent::ReceiveVersion)?;
