@@ -1,7 +1,8 @@
 use log::debug;
 
 use core::fmt;
-use std::{io::Write, net::TcpStream};
+use std::io::Write;
+use tokio::net::TcpStream;
 
 use crate::{
     config::SshConfig,
@@ -85,8 +86,8 @@ pub struct SshStateMachine {
 }
 
 impl SshStateMachine {
-    pub fn new(stream: TcpStream, config: SshConfig, is_client: bool) -> SshResult<Self> {
-        let transport = Transport::new(stream, config, is_client)?;
+    pub async fn new(stream: TcpStream, config: SshConfig, is_client: bool) -> SshResult<Self> {
+        let transport = Transport::new(stream, config, is_client).await?;
 
         Ok(SshStateMachine {
             state: SshState::Initial,
@@ -99,28 +100,28 @@ impl SshStateMachine {
         self.state
     }
 
-    pub fn process_event(&mut self, event: SshEvent) -> SshResult<()> {
+    pub async fn process_event(&mut self, event: SshEvent) -> SshResult<()> {
         println!("Processing event {} in state {}", event, self.state);
 
         // Handle state transitions
         match (self.state, &event) {
             // Initial state transitions
             (SshState::Initial, SshEvent::SendVersion) => {
-                self.send_version()?;
+                self.send_version().await?;
                 self.state = SshState::VersionExchanged;
             }
             (SshState::Initial, SshEvent::ReceiveVersion) => {
-                self.receive_version()?;
+                self.receive_version().await?;
                 self.state = SshState::VersionExchanged;
             }
 
             // Version exchanged transitions
             (SshState::VersionExchanged, SshEvent::SendKexInit) => {
-                self.send_kexinit()?;
+                self.send_kexinit().await?;
                 self.state = SshState::KexInitSent;
             }
             (SshState::VersionExchanged, SshEvent::ReceiveKexInit) => {
-                self.receive_kexinit()?;
+                self.receive_kexinit().await?;
                 self.state = SshState::KexInitReceived;
             }
 
@@ -129,7 +130,7 @@ impl SshStateMachine {
                 self.state = SshState::Error;
             }
             (_, SshEvent::Disconnect) => {
-                self.disconnect()?;
+                self.disconnect().await?;
                 self.state = SshState::Closed;
             }
 
@@ -145,20 +146,20 @@ impl SshStateMachine {
         Ok(())
     }
 
-    pub fn process_next(&mut self) -> SshResult<()> {
+    pub async fn process_next(&mut self) -> SshResult<()> {
         match self.state {
             SshState::Initial => {
                 if self.is_client {
-                    self.process_event(SshEvent::SendVersion)?;
+                    self.process_event(SshEvent::SendVersion).await?;
                 } else {
-                    self.process_event(SshEvent::ReceiveVersion)?;
+                    self.process_event(SshEvent::ReceiveVersion).await?;
                 }
             }
             SshState::VersionExchanged => {
                 if self.is_client {
-                    self.process_event(SshEvent::SendKexInit)?;
+                    self.process_event(SshEvent::SendKexInit).await?;
                 } else {
-                    self.process_event(SshEvent::ReceiveKexInit)?;
+                    self.process_event(SshEvent::ReceiveKexInit).await?;
                 }
             }
             _ => {
@@ -172,7 +173,7 @@ impl SshStateMachine {
         Ok(())
     }
 
-    fn send_version(&mut self) -> SshResult<()> {
+    async fn send_version(&mut self) -> SshResult<()> {
         let version = match self.is_client {
             true => self.transport.config.client_version.as_deref(),
             false => self.transport.config.server_version.as_deref(),
@@ -182,20 +183,20 @@ impl SshStateMachine {
         println!("Sending version: {}", version);
 
         let version_string = format!("{}\r\n", version);
-        self.transport.write_all(version_string.as_bytes())?;
+        self.transport.write_all(version_string.as_bytes()).await?;
 
         // If we're the client, we need to receive the server's version
         if self.is_client {
-            self.receive_version()?;
+            self.receive_version().await?;
         }
 
         Ok(())
     }
 
-    fn receive_version(&mut self) -> SshResult<()> {
+    async fn receive_version(&mut self) -> SshResult<()> {
         // NOTE: Maybe change this, RFC specifes only accepts 255 byte strings
         let mut remote_version = String::new();
-        self.transport.read_line(&mut remote_version)?;
+        self.transport.read_line(&mut remote_version).await?;
 
         debug!("Remote version bytes: {:?}", remote_version.as_bytes());
 
@@ -219,7 +220,7 @@ impl SshStateMachine {
         Ok(())
     }
 
-    fn send_kexinit(&mut self) -> SshResult<()> {
+    async fn send_kexinit(&mut self) -> SshResult<()> {
         println!("Sending KEXINIT");
 
         // TODO: Implement
@@ -227,7 +228,7 @@ impl SshStateMachine {
         Ok(())
     }
 
-    fn receive_kexinit(&mut self) -> SshResult<()> {
+    async fn receive_kexinit(&mut self) -> SshResult<()> {
         println!("Receiving KEXINIT");
 
         // TODO: Implement
@@ -235,7 +236,7 @@ impl SshStateMachine {
         Ok(())
     }
 
-    fn disconnect(&mut self) -> SshResult<()> {
+    async fn disconnect(&mut self) -> SshResult<()> {
         println!("Disconnecting");
 
         // TODO: Send disconnect message

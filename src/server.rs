@@ -5,9 +5,9 @@ use crate::{
     error::SshResult,
     state::{SshEvent, SshStateMachine},
 };
-use std::{
+use tokio::{
     net::{TcpListener, TcpStream},
-    thread,
+    task,
 };
 
 pub struct SshServer {
@@ -19,45 +19,44 @@ impl SshServer {
     pub fn new(config: SshConfig) -> Self {
         SshServer { config }
     }
-    pub fn listen(&self, address: &str) -> SshResult<()> {
+
+    pub async fn listen(&self, address: &str) -> SshResult<()> {
         println!("Starting SSH server on {}", address);
 
-        let listener = TcpListener::bind(address)?;
+        let listener = TcpListener::bind(address).await?;
 
-        for stream in listener.incoming() {
-            match stream {
-                Ok(stream) => {
-                    let config = self.config.clone();
+        loop {
+            let (stream, addr) = listener.accept().await?;
+            println!("New connection from {}", addr);
 
-                    // Handle each connection in a new thread
-                    thread::spawn(move || {
-                        if let Err(e) = handle_connection(stream, config) {
-                            eprintln!("Error handling connection: {}", e);
-                        }
-                    });
+            let config = self.config.clone();
+
+            // Handle each connection in a new task
+            task::spawn(async move {
+                if let Err(e) = handle_connection(stream, config).await {
+                    eprintln!("Error handling connection: {}", e);
                 }
-                Err(e) => {
-                    eprintln!("Connection failed: {}", e);
-                }
-            }
+            });
         }
-
-        Ok(())
     }
 }
 
 /// Handles a client connection
-fn handle_connection(stream: TcpStream, config: SshConfig) -> SshResult<()> {
+async fn handle_connection(stream: TcpStream, config: SshConfig) -> SshResult<()> {
     let peer_addr = stream.peer_addr()?;
     println!("New connection from {}", peer_addr);
 
-    let mut state_machine = SshStateMachine::new(stream, config, false)?;
+    let mut state_machine = SshStateMachine::new(stream, config, false).await?;
 
     // Start the connection process
-    state_machine.process_event(SshEvent::ReceiveVersion)?;
+    state_machine
+        .process_event(SshEvent::ReceiveVersion)
+        .await?;
 
-    state_machine.process_event(SshEvent::SendKexInit)?;
-    state_machine.process_event(SshEvent::ReceiveKexInit)?;
+    state_machine.process_event(SshEvent::SendKexInit).await?;
+    state_machine
+        .process_event(SshEvent::ReceiveKexInit)
+        .await?;
 
     println!("[{}] Version exchange completed", peer_addr);
 

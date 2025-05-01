@@ -25,7 +25,7 @@ Examples:
     );
 }
 
-fn run_server(address: &str) -> SshResult<()> {
+async fn run_server(address: &str) -> SshResult<()> {
     println!("Starting SSH server...");
 
     let mut config = SshConfig::default();
@@ -33,25 +33,26 @@ fn run_server(address: &str) -> SshResult<()> {
 
     let server = SshServer::new(config);
 
-    server.listen(address)?;
+    server.listen(address).await?;
 
     println!("SSH server finished");
 
     Ok(())
 }
 
-fn run_client(address: &str) -> SshResult<()> {
+async fn run_client(address: &str) -> SshResult<()> {
     println!("Starting SSH client...");
 
     let mut config = SshConfig::default();
     config.client_version = Some(String::from(PROTOCOL_VERSION));
 
-    let _client = SshClient::connect(address, config)?;
+    let _client = SshClient::connect(address, config).await?;
 
     Ok(())
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     env_logger::init();
 
     let args: Vec<String> = env::args().collect();
@@ -69,8 +70,8 @@ fn main() {
     };
 
     let result = match mode.as_str() {
-        "client" => run_client(&address),
-        "server" => run_server(&address),
+        "client" => run_client(&address).await,
+        "server" => run_server(&address).await,
         _ => {
             eprintln!("Invalid mode: {}", mode);
             print_usage();

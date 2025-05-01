@@ -1,40 +1,44 @@
-use std::{
-    io::{BufRead, BufReader, Write},
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader, split},
     net::TcpStream,
 };
 
 use crate::{config::SshConfig, error::SshResult};
 
 pub struct Transport {
-    stream: TcpStream,
-    reader: BufReader<TcpStream>,
+    reader: BufReader<tokio::io::ReadHalf<TcpStream>>,
+    writer: tokio::io::WriteHalf<TcpStream>,
     pub config: SshConfig,
     is_client: bool,
 }
 
 impl Transport {
-    pub fn new(stream: TcpStream, config: SshConfig, is_client: bool) -> SshResult<Self> {
-        let reader = BufReader::new(stream.try_clone()?); // Clone for buffered reading
+    pub async fn new(stream: TcpStream, config: SshConfig, is_client: bool) -> SshResult<Self> {
+        // Split the TcpStream into a ReadHalf and WriteHalf
+        let (reader, writer) = split(stream);
+
+        // Create a BufReader for the reader half
+        let reader = BufReader::new(reader);
 
         Ok(Transport {
-            stream,
             reader,
+            writer,
             config,
             is_client,
         })
     }
 
-    pub fn read_line(&mut self, line: &mut String) -> SshResult<()> {
-        self.reader.read_line(line)?;
+    pub async fn read_line(&mut self, line: &mut String) -> SshResult<()> {
+        self.reader.read_line(line).await?;
         Ok(())
     }
 
-    pub fn write_all(&mut self, buf: &[u8]) -> SshResult<()> {
-        let inner = self.reader.get_mut();
-        inner.write_all(buf)?;
-        inner.flush()?;
+    pub async fn write_all(&mut self, buf: &[u8]) -> SshResult<()> {
+        self.writer.write_all(buf).await?;
+        self.writer.flush().await?;
         Ok(())
     }
+
     pub fn is_client(&self) -> bool {
         self.is_client
     }
