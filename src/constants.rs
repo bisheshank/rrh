@@ -18,5 +18,6 @@ pub mod msg {
     pub const SERVICE_ACCEPT: u8 = 6;
     pub const KEXINIT: u8 = 20;
     pub const NEWKEYS: u8 = 21;
-    // KEX specific messages start at 30
+    pub const KEXDH_INIT: u8 = 30;
+    pub const KEXDH_REPLY: u8 = 31;
 }

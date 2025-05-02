@@ -1,9 +1,9 @@
-use std::fmt;
+use std::{fmt, str::from_utf8};
 
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use crate::{
-    constants::msg,
+    constants::{KEX_COOKIE_SIZE, msg},
     error::{SshError, SshResult},
     ssh_codec::SshPacket,
 };
@@ -63,6 +63,48 @@ impl Message {
 
                 Ok(SshPacket::new(msg::UNIMPLEMENTED, buffer.freeze()))
             }
+            Message::KexInit {
+                cookie,
+                kex_algorithms,
+                server_host_key_algorithms,
+                encryption_algorithms_client_to_server,
+                encryption_algorithms_server_to_client,
+                mac_algorithms_client_to_server,
+                mac_algorithms_server_to_client,
+                compression_algorithms_client_to_server,
+                compression_algorithms_server_to_client,
+                languages_client_to_server,
+                languages_server_to_client,
+                first_kex_packet_follows,
+                reserved,
+            } => {
+                let mut buffer = BytesMut::new();
+
+                buffer.put_slice(cookie);
+
+                fn put_name_list(buffer: &mut BytesMut, list: &[String]) {
+                    let joined = list.join(",");
+                    buffer.put_u32(joined.len() as u32);
+                    buffer.put_slice(joined.as_bytes());
+                }
+
+                put_name_list(&mut buffer, kex_algorithms);
+                put_name_list(&mut buffer, server_host_key_algorithms);
+                put_name_list(&mut buffer, encryption_algorithms_client_to_server);
+                put_name_list(&mut buffer, encryption_algorithms_server_to_client);
+                put_name_list(&mut buffer, mac_algorithms_client_to_server);
+                put_name_list(&mut buffer, mac_algorithms_server_to_client);
+                put_name_list(&mut buffer, compression_algorithms_client_to_server);
+                put_name_list(&mut buffer, compression_algorithms_server_to_client);
+                put_name_list(&mut buffer, languages_client_to_server);
+                put_name_list(&mut buffer, languages_server_to_client);
+
+                buffer.put_u8(*first_kex_packet_follows as u8);
+
+                buffer.put_u32(*reserved);
+
+                Ok(SshPacket::new(msg::KEXINIT, buffer.freeze()))
+            }
             _ => Ok(SshPacket::new(1, Bytes::default())),
         }
     }
@@ -88,6 +130,76 @@ impl Message {
                 let sequence_number = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
 
                 Ok(Message::Unimplemented { sequence_number })
+            }
+            msg::KEXINIT => {
+                if data.len() < KEX_COOKIE_SIZE {
+                    return Err(SshError::Protocol("KEXINIT message too short".to_string()));
+                }
+
+                let mut reader = Bytes::copy_from_slice(&data);
+
+                let mut cookie = [0u8; KEX_COOKIE_SIZE];
+                reader.copy_to_slice(&mut cookie);
+
+                fn parse_name_list(reader: &mut Bytes) -> SshResult<Vec<String>> {
+                    if reader.remaining() < 4 {
+                        return Err(SshError::Protocol("Name-list field truncated".to_string()));
+                    }
+
+                    let len = reader.get_u32() as usize;
+
+                    if reader.remaining() < len {
+                        return Err(SshError::Protocol("Name-list field truncated".to_string()));
+                    }
+
+                    let bytes = reader.split_to(len);
+
+                    let s = from_utf8(&bytes)
+                        .map_err(|_| SshError::Protocol("Invalid UTF-8 in name-list".into()))?;
+
+                    Ok(if s.is_empty() {
+                        Vec::new()
+                    } else {
+                        s.split(',').map(|s| s.to_string()).collect()
+                    })
+                }
+
+                // Parse all the name-lists
+                let kex_algorithms = parse_name_list(&mut reader)?;
+                let server_host_key_algorithms = parse_name_list(&mut reader)?;
+                let encryption_algorithms_client_to_server = parse_name_list(&mut reader)?;
+                let encryption_algorithms_server_to_client = parse_name_list(&mut reader)?;
+                let mac_algorithms_client_to_server = parse_name_list(&mut reader)?;
+                let mac_algorithms_server_to_client = parse_name_list(&mut reader)?;
+                let compression_algorithms_client_to_server = parse_name_list(&mut reader)?;
+                let compression_algorithms_server_to_client = parse_name_list(&mut reader)?;
+                let languages_client_to_server = parse_name_list(&mut reader)?;
+                let languages_server_to_client = parse_name_list(&mut reader)?;
+
+                if reader.remaining() < 5 {
+                    return Err(SshError::Protocol(
+                        "KEXINIT message truncated at flags".to_string(),
+                    ));
+                }
+
+                let first_kex_packet_follows = reader.get_u8() != 0;
+                let reserved = reader.get_u32();
+
+                Ok(Message::KexInit {
+                    cookie,
+                    kex_algorithms,
+                    server_host_key_algorithms,
+                    encryption_algorithms_client_to_server,
+                    encryption_algorithms_server_to_client,
+                    mac_algorithms_client_to_server,
+                    mac_algorithms_server_to_client,
+                    compression_algorithms_client_to_server,
+                    compression_algorithms_server_to_client,
+                    languages_client_to_server,
+                    languages_server_to_client,
+                    first_kex_packet_follows,
+                    reserved,
+                })
             }
             _ => Ok(Message::Unimplemented { sequence_number: 0 }),
         }
