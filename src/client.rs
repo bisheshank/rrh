@@ -31,6 +31,7 @@ impl SshClient {
                 .await?;
         }
 
+
         // Complete DH key exchange
         state_machine.process_event(SshEvent::SendDhInit).await?;
         state_machine
@@ -42,5 +43,33 @@ impl SshClient {
         println!("Successfully connected to {}", address);
 
         Ok(Self { state_machine })
+    }
+
+    fn kexinit_exchange(&mut self) -> Result<()> {
+        //want server to send kexinit message
+        debug!("Sending KEXINIT message");
+    
+        let kexinit_string = format!("{}\r\n", KEXINIT);
+        self.writer.write_all(kexinit_string.as_bytes())?;
+        self.writer.flush()?;
+    
+        debug!("Sent KEXINIT message");
+    
+        let mut line = String::new();
+        self.reader.read_line(&mut line)?;
+    
+        debug!("Received KEXINIT message");
+    
+        let server_kexinit = line.trim_end().to_string();
+    
+        if !server_kexinit.starts_with("20") {
+            return Err(SSHError::Protocol(format!(
+                "Did not receive KEXINIT message: {}",
+                server_kexinit
+            )));
+        }
+    
+        info!("KEXINIT: {}", server_kexinit);
+        Ok(())
     }
 }
