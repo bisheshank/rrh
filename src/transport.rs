@@ -75,7 +75,7 @@ impl Transport {
 
         let mut packet = message.to_packet()?;
         packet.sequence_number = self.send_sequence_number;
-        let data = packet.encode();
+        let data = packet.encode()?;
 
         self.writer.write_all(&data).await?;
         self.writer.flush().await?;
