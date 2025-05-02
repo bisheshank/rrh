@@ -1,3 +1,4 @@
+use rand::rand_core::OsError;
 use thiserror::Error;
 
 /// Custom error types
@@ -8,6 +9,9 @@ pub enum SshError {
 
     #[error("Io: {0}")]
     Io(String),
+
+    #[error("Os: {0}")]
+    Os(String),
 
     #[error("Protocol: {0}")]
     Protocol(String),
@@ -28,6 +32,12 @@ pub enum SshError {
 impl From<std::io::Error> for SshError {
     fn from(err: std::io::Error) -> Self {
         SshError::Io(err.to_string())
+    }
+}
+
+impl From<OsError> for SshError {
+    fn from(err: OsError) -> Self {
+        SshError::Os(err.to_string())
     }
 }
 

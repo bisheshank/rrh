@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use log::{debug, info};
 
 use core::fmt;
@@ -7,6 +8,9 @@ use tokio::net::TcpStream;
 use crate::{
     config::SshConfig,
     error::{SshError, SshResult},
+    kex::create_kexinit_message,
+    message::Message,
+    ssh_codec::SshPacket,
     transport::Transport,
 };
 
@@ -284,7 +288,13 @@ impl SshStateMachine {
     async fn send_kexinit(&mut self) -> SshResult<()> {
         info!("Sending KEXINIT");
 
-        // TODO: Implement
+        let kexinit_message = create_kexinit_message()?;
+        let packet = kexinit_message.to_packet()?;
+
+        self.transport.config.client_kexinit = Some(packet.payload.to_vec());
+        self.transport.send_message(kexinit_message).await?;
+
+        self.try_negotiate_kex().await?;
 
         Ok(())
     }
@@ -292,7 +302,62 @@ impl SshStateMachine {
     async fn receive_kexinit(&mut self) -> SshResult<()> {
         info!("Receiving KEXINIT");
 
-        // TODO: Implement
+        let kexinit_msg = self.transport.receive_message().await?;
+
+        let packet = match &kexinit_msg {
+            Message::KexInit { .. } => kexinit_msg.to_packet()?,
+            _ => return Err(SshError::Protocol("Expected KEXINIT message".into())),
+        };
+
+        self.transport.config.server_kexinit = Some(packet.payload.to_vec());
+
+        self.try_negotiate_kex().await?;
+
+        Ok(())
+    }
+
+    async fn try_negotiate_kex(&mut self) -> SshResult<()> {
+        let (client_kexinit, server_kexinit) = match (
+            &self.transport.config.client_kexinit,
+            &self.transport.config.server_kexinit,
+        ) {
+            (Some(c), Some(s)) => (c.clone(), s.clone()),
+            _ => return Ok(()), // Not ready to negotiate
+        };
+
+        let client_msg = Message::from_packet(&SshPacket {
+            sequence_number: 0,
+            payload: Bytes::from(client_kexinit),
+            msg_type: crate::constants::msg::KEXINIT,
+        })?;
+
+        let server_msg = Message::from_packet(&SshPacket {
+            sequence_number: 0,
+            payload: Bytes::from(server_kexinit),
+            msg_type: crate::constants::msg::KEXINIT,
+        })?;
+
+        let negotiated = crate::kex::negotiate_algorithms(&client_msg, &server_msg)?;
+
+        self.transport.config.negotiated = negotiated;
+
+        info!("Algorithm negotiation completed successfully");
+
+        if log::log_enabled!(log::Level::Info) {
+            info!("KEX algorithm: {}", self.transport.config.negotiated.kex);
+            info!(
+                "Host key algorithm: {}",
+                self.transport.config.negotiated.host_key
+            );
+            info!(
+                "C2S encryption: {}",
+                self.transport.config.negotiated.encryption_c2s
+            );
+            info!(
+                "S2C encryption: {}",
+                self.transport.config.negotiated.encryption_s2c
+            );
+        }
 
         Ok(())
     }
