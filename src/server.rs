@@ -1,94 +1,69 @@
 use log::{debug, info};
 
 use crate::{
-    constants::PROTOCOL_VERSION,
-    error::{Result, SSHError},
-    constants::msg::KEXINIT
+    config::SshConfig,
+    error::SshResult,
+    state::{SshEvent, SshStateMachine},
 };
-use std::{
-    io::{BufRead, BufReader, Write},
+use tokio::{
     net::{TcpListener, TcpStream},
-    thread,
+    task,
 };
 
-pub struct Server {
-    listener: TcpListener,
+pub struct SshServer {
+    config: SshConfig,
+    // Have different sessions
 }
 
-impl Server {
-    pub fn listen(addr: &str) -> Result<Self> {
-        info!("Listening on {}", addr);
-
-        let listener = TcpListener::bind(addr)?;
-
-        let server = Server { listener };
-
-        return Ok(server);
+impl SshServer {
+    pub fn new(config: SshConfig) -> Self {
+        SshServer { config }
     }
 
-    pub fn run(&self) -> Result<()> {
-        info!("Server running, waiting for connections...");
+    pub async fn listen(&self, address: &str) -> SshResult<()> {
+        println!("Starting SSH server on {}", address);
 
-        for stream in self.listener.incoming() {
-            match stream {
-                Ok(stream) => {
-                    let peer_addr = stream.peer_addr()?;
-                    info!("New connection from {}", peer_addr);
+        let listener = TcpListener::bind(address).await?;
 
-                    // Handle each one in a new thread
-                    thread::spawn(move || {
-                        if let Err(e) = handle_client(stream) {
-                            eprintln!("Error handling client {}: {}", peer_addr, e)
-                        }
-                    });
+        loop {
+            let (stream, addr) = listener.accept().await?;
+            println!("New connection from {}", addr);
+
+            let config = self.config.clone();
+
+            // Handle each connection in a new task
+            task::spawn(async move {
+                if let Err(e) = handle_connection(stream, config).await {
+                    eprintln!("Error handling connection: {}", e);
                 }
-                Err(e) => {
-                    eprintln!("Connection failed: {}", e);
-                }
-            }
+            });
         }
-
-        Ok(())
     }
 }
 
-fn handle_client(mut stream: TcpStream) -> Result<()> {
-    // Exchange protocol versions
-    exchange_versions(&mut stream)?;
+/// Handles a client connection
+async fn handle_connection(stream: TcpStream, config: SshConfig) -> SshResult<()> {
+    let peer_addr = stream.peer_addr()?;
+    println!("New connection from {}", peer_addr);
 
-    //exchange KEXINIT messages
-    kexinit_exchange(&mut stream)?;
+    let mut state_machine = SshStateMachine::new(stream, config, false).await?;
 
-    //need to start dh process
+    // Start the connection process
+    state_machine
+        .process_event(SshEvent::ReceiveVersion)
+        .await?;
+    state_machine.process_event(SshEvent::SendVersion).await?;
 
-    Ok(())
-}
+    state_machine.process_event(SshEvent::SendKexInit).await?;
+    state_machine
+        .process_event(SshEvent::ReceiveKexInit)
+        .await?;
 
-fn exchange_versions(stream: &mut TcpStream) -> Result<()> {
-    debug!("Exchanging versions");
+    println!("[{}] Version exchange completed", peer_addr);
 
-    let version_string = format!("{}\r\n", PROTOCOL_VERSION);
-    stream.write_all(version_string.as_bytes())?;
-    stream.flush()?;
-
-    debug!("Sent version string");
-
-    let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    reader.read_line(&mut line)?;
-
-    debug!("Received version string");
-
-    let client_version = line.trim_end().to_string();
-
-    if !client_version.starts_with("SSH-2.0") {
-        return Err(SSHError::Protocol(format!(
-            "Incompatible SSH version: {}",
-            client_version
-        )));
-    }
-
-    info!("Client version: {}", client_version);
+    // Complete the key exchange
+    state_machine.process_event(SshEvent::ReceiveDhInit).await?;
+    state_machine.process_event(SshEvent::SendDhReply).await?;
 
     Ok(())
 }
