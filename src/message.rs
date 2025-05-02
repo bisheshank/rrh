@@ -1,8 +1,12 @@
 use std::fmt;
 
-use bytes::Bytes;
+use bytes::{BufMut, Bytes, BytesMut};
 
-use crate::{error::SshResult, ssh_codec::SshPacket};
+use crate::{
+    constants::msg,
+    error::{SshError, SshResult},
+    ssh_codec::SshPacket,
+};
 
 pub enum Message {
     Disconnect {
@@ -52,10 +56,40 @@ impl fmt::Display for Message {
 
 impl Message {
     pub fn to_packet(&self) -> SshResult<SshPacket> {
-        Ok(SshPacket::new(1, Bytes::default()))
+        match self {
+            Message::Unimplemented { sequence_number } => {
+                let mut buffer = BytesMut::new();
+                buffer.put_u32(*sequence_number);
+
+                Ok(SshPacket::new(msg::UNIMPLEMENTED, buffer.freeze()))
+            }
+            _ => Ok(SshPacket::new(1, Bytes::default())),
+        }
     }
 
     pub fn from_packet(packet: &SshPacket) -> SshResult<Self> {
-        Ok(Message::Unimplemented { sequence_number: 0 })
+        let payload = &packet.payload;
+
+        if payload.len() < 1 {
+            return Err(SshError::Protocol("Empty packet payload".to_string()));
+        }
+
+        let msg_type = payload[0];
+        let data = payload.slice(1..);
+
+        match msg_type {
+            msg::UNIMPLEMENTED => {
+                if data.len() < 4 {
+                    return Err(SshError::Protocol(
+                        "UNIMPLEMENTED message too short".to_string(),
+                    ));
+                }
+
+                let sequence_number = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+
+                Ok(Message::Unimplemented { sequence_number })
+            }
+            _ => Ok(Message::Unimplemented { sequence_number: 0 }),
+        }
     }
 }
