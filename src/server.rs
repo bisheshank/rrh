@@ -68,31 +68,4 @@ async fn handle_connection(stream: TcpStream, config: SshConfig) -> SshResult<()
     Ok(())
 }
 
-fn kexinit_exchange(stream: &mut TcpStream) -> Result<()> {
-    //want server to send kexinit message
-    debug!("Sending KEXINIT message");
 
-    let kexinit_string = format!("{}\r\n", KEXINIT);
-    stream.write_all(kexinit_string.as_bytes())?;
-    stream.flush()?;
-
-    debug!("Sent KEXINIT message");
-
-    let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    reader.read_line(&mut line)?;
-
-    debug!("Received KEXINIT message");
-
-    let client_kexinit = line.trim_end().to_string();
-
-    if !client_kexinit.starts_with("20") {
-        return Err(SSHError::Protocol(format!(
-            "Did not receive KEXINIT message: {}",
-            client_kexinit
-        )));
-    }
-
-    info!("KEXINIT: {}", client_kexinit);
-    Ok(())
-}
