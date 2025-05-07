@@ -13,6 +13,8 @@ use crate::{
     ssh_codec::SshPacket,
 };
 
+use x25519_dalek::{EphemeralSecret};
+
 pub struct Transport {
     // All config values
     pub config: SshConfig,
@@ -31,6 +33,7 @@ pub struct Transport {
 pub struct SessionKeys {
     pub shared_key: Option<[u8; 32]>, 
     pub client_public: Option<[u8; 32]>,
+    pub secret: Option<EphemeralSecret>, //need to store secret for computing shared secret
 }
 
 impl Transport {
@@ -44,6 +47,7 @@ impl Transport {
         let session_keys = SessionKeys {
             shared_key: None,
             client_public: None,
+            secret: None
         };
 
         Ok(Transport {

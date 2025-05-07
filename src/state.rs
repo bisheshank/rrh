@@ -9,11 +9,11 @@ use tokio::net::TcpStream;
 use std::fs::File;
 
 use crate::{
-    config::SshConfig, 
-    constants::{host_keys::PUBLIC_SERVER_HOST_KEY, reason_codes::{self, SSH_DISCONNECT_BY_APPLICATION, SSH_DISCONNECT_HOST_KEY_NOT_VERIFIABLE}}, error::{SshError, SshResult}, kex::create_kexinit_message, message::Message, ssh_codec::SshPacket, transport::Transport
+    client, config::SshConfig, constants::{host_keys::{PRIVATE_SERVER_HOST_KEY, PUBLIC_SERVER_HOST_KEY}, reason_codes::{self, SSH_DISCONNECT_BY_APPLICATION, SSH_DISCONNECT_HOST_KEY_NOT_VERIFIABLE}}, error::{SshError, SshResult}, kex::create_kexinit_message, message::Message, ssh_codec::SshPacket, transport::Transport
 };
 
-use x25519_dalek::{EphemeralSecret, PublicKey, SharedSecret};
+use x25519_dalek::{PublicKey};
+use ed25519_dalek::{SigningKey, Signature, Verifier, Signer, VerifyingKey};
 use crate::kex::{generate_public_private, generate_shared};
 
 #[derive(PartialEq, Clone, Copy)]
@@ -293,7 +293,12 @@ impl SshStateMachine {
         let kexinit_message = create_kexinit_message()?;
         let packet = kexinit_message.to_packet()?;
 
-        self.transport.config.client_kexinit = Some(packet.payload.to_vec());
+        if self.is_client {
+            self.transport.config.client_kexinit = Some(packet.payload.to_vec());
+        } else {
+            self.transport.config.server_kexinit = Some(packet.payload.to_vec());
+        }
+
         self.transport.send_message(kexinit_message).await?;
 
         self.try_negotiate_kex().await?;
@@ -311,7 +316,11 @@ impl SshStateMachine {
             _ => return Err(SshError::Protocol("Expected KEXINIT message".into())),
         };
 
-        self.transport.config.server_kexinit = Some(packet.payload.to_vec());
+        if self.is_client {
+            self.transport.config.server_kexinit = Some(packet.payload.to_vec());
+        } else {
+            self.transport.config.client_kexinit = Some(packet.payload.to_vec());
+        }
 
         self.try_negotiate_kex().await?;
 
@@ -378,7 +387,10 @@ impl SshStateMachine {
 
         // TODO: Need to store client secret key
         let (secret, public) = generate_public_private();
-        
+
+        self.transport.session_keys.secret = Some(secret);
+
+        self.transport.session_keys.client_public = Some(*public.as_bytes());
         let public_bytes = public.as_bytes().to_vec(); 
         let dhinit_message = Message::KexDhInit { e: (public_bytes) };
 
@@ -414,8 +426,59 @@ impl SshStateMachine {
                     return Err(SshError::Protocol("Host key received was not of the right length".into()));
                 }
 
-                let server_public_key = PublicKey::from(*slice_u8); 
-                //would now need to verify the signature, and then compute the shared secret 
+                let verification_key = VerifyingKey::from_bytes(&slice_u8).expect("Failed to convert public key bytes");
+                //would now need to verify the signature by recomputing the hash, and verifying against 
+                //the signature received
+
+                let client_secret = self.transport.session_keys.secret
+                    .take()
+                    .ok_or(SshError::Protocol("Missing client secret".into()))?;
+
+                let server_key_bytes = <[u8; 32]>::try_from(f.as_slice())
+                    .map_err(|_| SshError::Protocol("Invalid key length".into()))?;
+                let server_public = PublicKey::from(server_key_bytes);
+
+                let shared_secret = generate_shared(client_secret, server_public);
+
+                let mut hasher = Sha1::new();
+
+                let V_C = self.transport.config.client_version.as_deref().unwrap_or("").as_bytes();
+                let V_S = self.transport.config.server_version.as_deref().unwrap_or("").as_bytes();
+
+
+                let I_C = self.transport.config.client_kexinit.as_deref().unwrap_or(&[]);
+                let I_S = self.transport.config.server_kexinit.as_deref().unwrap_or(&[]);
+
+                let K_S = &PUBLIC_SERVER_HOST_KEY;
+                
+                let e = self.transport.session_keys.client_public.as_ref().map(|val| val as &[u8]).unwrap_or(&[]);
+                let f = server_public.as_bytes();
+
+                let K = shared_secret.as_bytes();
+
+                hasher.update(V_C);
+                hasher.update(V_S);
+                hasher.update(I_C);
+                hasher.update(I_S);
+                hasher.update(K_S);
+                hasher.update(e);
+                hasher.update(f);
+                hasher.update(K);
+
+                let hash_result = hasher.finalize();
+                let signature_hash = hash_result.to_vec();
+
+                let signature_array: [u8; 64] = signature.try_into()
+                    .expect("Failed to convert Vec<u8> to [u8; 64]");
+
+                // Convert the signature bytes to a Signature
+                let signature = Signature::from_bytes(&signature_array);
+
+                verification_key.verify(&signature_hash, &signature)
+                    .map_err(|_| SshError::Protocol("Signature verification failed".into()))?;
+
+                //signature verified, shared_key computed
+                self.transport.session_keys.shared_key = Some(*shared_secret.as_bytes());
             },
             _ => {
                 return Err(SshError::Protocol("Expected KEXDH_REPLY".into()));
@@ -423,9 +486,7 @@ impl SshStateMachine {
         }
 
 
-        Err(SshError::NotImplemented(
-            "KEXDH_REPLY not implemented".into(),
-        ))
+        Ok(())
     }
 
     async fn receive_dh_init(&mut self) -> SshResult<()> {
@@ -490,7 +551,7 @@ impl SshStateMachine {
         let client_pub_bytes = self.transport.session_keys.client_public.as_ref().expect("Missing client key");
 
         let client_public = PublicKey::from(*client_pub_bytes);
-        let shared_secret = server_secret.diffie_hellman(&client_public);
+        let shared_secret = generate_shared(server_secret, client_public);
         
         let K = shared_secret.as_bytes();
 
@@ -507,11 +568,13 @@ impl SshStateMachine {
         let signature_hash = hash_result.to_vec();
 
         //instead of just sending the hash, i need to sign with host keypair and send the signature
+        let signing_key = SigningKey::from_bytes(&PRIVATE_SERVER_HOST_KEY);
+        let signature = signing_key.sign(&signature_hash).to_bytes().to_vec();
 
         let dh_reply_message = Message::KexDhReply { 
             k_s: PUBLIC_SERVER_HOST_KEY.to_vec(), 
             f: public_bytes, 
-            signature: signature_hash 
+            signature: signature 
         };
 
         self.transport.send_message(dh_reply_message).await?;
