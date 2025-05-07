@@ -1,18 +1,15 @@
 use bytes::Bytes;
-use log::{debug, info};
+use log::info;
 use sha1::{Sha1, Digest};
 
 use core::fmt;
-use std::io::Write;
 use tokio::net::TcpStream;
 
-use std::fs::File;
-
 use crate::{
-    client, config::SshConfig, constants::{host_keys::{PRIVATE_SERVER_HOST_KEY, PUBLIC_SERVER_HOST_KEY}, reason_codes::{self, SSH_DISCONNECT_BY_APPLICATION, SSH_DISCONNECT_HOST_KEY_NOT_VERIFIABLE}}, error::{SshError, SshResult}, kex::create_kexinit_message, message::Message, ssh_codec::SshPacket, transport::Transport
+    config::SshConfig, constants::{host_keys::{PRIVATE_SERVER_HOST_KEY, PUBLIC_SERVER_HOST_KEY}, reason_codes::{self, SSH_DISCONNECT_BY_APPLICATION, SSH_DISCONNECT_HOST_KEY_NOT_VERIFIABLE}}, error::{SshError, SshResult}, kex::create_kexinit_message, message::Message, ssh_codec::SshPacket, transport::Transport
 };
 
-use x25519_dalek::{PublicKey};
+use x25519_dalek::PublicKey;
 use ed25519_dalek::{SigningKey, Signature, Verifier, Signer, VerifyingKey};
 use crate::kex::{generate_public_private, generate_shared};
 
@@ -29,8 +26,16 @@ pub enum SshState {
     DhReplyReceived, // Client only
     DhInitReceived,  // Server only
     DhReplySent,     // Server only
+    NewKeysSent,
+    NewKeysReceived,
+    KeysExchanged,
+    
 
     // Authentication states
+    AuthRequested,
+    AuthMethodNegotiated,
+    AuthInProgress,
+    AuthSuccess,
 
     // Connection states
     ChannelOpening,
@@ -54,6 +59,13 @@ impl fmt::Display for SshState {
             SshState::DhReplyReceived => write!(f, "DhReplyReceived"),
             SshState::DhInitReceived => write!(f, "DhInitReceived"),
             SshState::DhReplySent => write!(f, "DhReplySent"),
+            SshState::NewKeysSent => write!(f, "NewKeysSent"),
+            SshState::NewKeysReceived => write!(f, "NewKeysReceived"),
+            SshState::KeysExchanged => write!(f, "KeysExchanged"),
+            SshState::AuthRequested => write!(f, "AuthRequested"),
+            SshState::AuthMethodNegotiated => write!(f, "AuthMethodNegotiated"),
+            SshState::AuthInProgress => write!(f, "AuthInProgress"),
+            SshState::AuthSuccess => write!(f, "AuthSuccess"),
             SshState::ChannelOpening => write!(f, "ChannelOpening"),
             SshState::ChannelOpen => write!(f, "ChannelOpen"),
             SshState::SessionStarted => write!(f, "SessionStarted"),
@@ -76,11 +88,20 @@ pub enum SshEvent {
     ReceiveDhReply, // Client only
     ReceiveDhInit,  // Server only
     SendDhReply,    // Server only
+    SendNewKeys,
+    ReceiveNewKeys,
 
     // Authentication events
+    RequestAuth,
+    SendAuthMethod,
+    ReceiveAuthRequest,
+    SendAuthSuccess,
+    SendAuthFailure,
 
     // Channel events
     OpenChannel,
+    ReceiveChannelOpen,
+    SendChannelOpenConfirmation,
 
     // Error events
     Error(String),
@@ -98,7 +119,16 @@ impl fmt::Display for SshEvent {
             SshEvent::ReceiveDhReply => write!(f, "ReceiveDhReply"),
             SshEvent::ReceiveDhInit => write!(f, "ReceiveDhInit"),
             SshEvent::SendDhReply => write!(f, "SendDhReply"),
+            SshEvent::SendNewKeys => write!(f, "SendNewKeys"),
+            SshEvent::ReceiveNewKeys => write!(f, "ReceiveNewKeys"),
+            SshEvent::RequestAuth => write!(f, "RequestAuth"),
+            SshEvent::SendAuthMethod => write!(f, "SendAuthMethod"),
+            SshEvent::ReceiveAuthRequest => write!(f, "ReceiveAuthRequest"),
+            SshEvent::SendAuthSuccess => write!(f, "SendAuthSuccess"),
+            SshEvent::SendAuthFailure => write!(f, "SendAuthFailure"),
             SshEvent::OpenChannel => write!(f, "OpenChannel"),
+            SshEvent::ReceiveChannelOpen => write!(f, "ReceiveChannelOpen"),
+            SshEvent::SendChannelOpenConfirmation => write!(f, "SendChannelOpenConfirmation"),
             SshEvent::Error(msg) => write!(f, "Error({})", msg),
             SshEvent::Disconnect => write!(f, "Disconnect"),
         }
@@ -442,28 +472,28 @@ impl SshStateMachine {
 
                 let mut hasher = Sha1::new();
 
-                let V_C = self.transport.config.client_version.as_deref().unwrap_or("").as_bytes();
-                let V_S = self.transport.config.server_version.as_deref().unwrap_or("").as_bytes();
+                let v_c = self.transport.config.client_version.as_deref().unwrap_or("").as_bytes();
+                let v_s = self.transport.config.server_version.as_deref().unwrap_or("").as_bytes();
 
 
-                let I_C = self.transport.config.client_kexinit.as_deref().unwrap_or(&[]);
-                let I_S = self.transport.config.server_kexinit.as_deref().unwrap_or(&[]);
+                let i_c = self.transport.config.client_kexinit.as_deref().unwrap_or(&[]);
+                let i_s = self.transport.config.server_kexinit.as_deref().unwrap_or(&[]);
 
-                let K_S = &PUBLIC_SERVER_HOST_KEY;
+                let k_s = &PUBLIC_SERVER_HOST_KEY;
                 
                 let e = self.transport.session_keys.client_public.as_ref().map(|val| val as &[u8]).unwrap_or(&[]);
                 let f = server_public.as_bytes();
 
-                let K = shared_secret.as_bytes();
+                let k = shared_secret.as_bytes();
 
-                hasher.update(V_C);
-                hasher.update(V_S);
-                hasher.update(I_C);
-                hasher.update(I_S);
-                hasher.update(K_S);
+                hasher.update(v_c);
+                hasher.update(v_s);
+                hasher.update(i_c);
+                hasher.update(i_s);
+                hasher.update(k_s);
                 hasher.update(e);
                 hasher.update(f);
-                hasher.update(K);
+                hasher.update(k);
 
                 let hash_result = hasher.finalize();
                 let signature_hash = hash_result.to_vec();
@@ -536,14 +566,14 @@ impl SshStateMachine {
 
         let mut hasher = Sha1::new();
 
-        let V_C = self.transport.config.client_version.as_deref().unwrap_or("").as_bytes();
-        let V_S = self.transport.config.server_version.as_deref().unwrap_or("").as_bytes();
+        let v_c = self.transport.config.client_version.as_deref().unwrap_or("").as_bytes();
+        let v_s = self.transport.config.server_version.as_deref().unwrap_or("").as_bytes();
 
 
-        let I_C = self.transport.config.client_kexinit.as_deref().unwrap_or(&[]);
-        let I_S = self.transport.config.server_kexinit.as_deref().unwrap_or(&[]);
+        let i_c = self.transport.config.client_kexinit.as_deref().unwrap_or(&[]);
+        let i_s = self.transport.config.server_kexinit.as_deref().unwrap_or(&[]);
 
-        let K_S = &PUBLIC_SERVER_HOST_KEY;
+        let k_s = &PUBLIC_SERVER_HOST_KEY;
         
         let e = self.transport.session_keys.client_public.as_ref().map(|val| val as &[u8]).unwrap_or(&[]);
         let f = server_public.as_bytes();
@@ -553,16 +583,16 @@ impl SshStateMachine {
         let client_public = PublicKey::from(*client_pub_bytes);
         let shared_secret = generate_shared(server_secret, client_public);
         
-        let K = shared_secret.as_bytes();
+        let k = shared_secret.as_bytes();
 
-        hasher.update(V_C);
-        hasher.update(V_S);
-        hasher.update(I_C);
-        hasher.update(I_S);
-        hasher.update(K_S);
+        hasher.update(v_c);
+        hasher.update(v_s);
+        hasher.update(i_c);
+        hasher.update(i_s);
+        hasher.update(k_s);
         hasher.update(e);
         hasher.update(f);
-        hasher.update(K);
+        hasher.update(k);
 
         let hash_result = hasher.finalize();
         let signature_hash = hash_result.to_vec();
