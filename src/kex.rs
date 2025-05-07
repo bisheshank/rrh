@@ -1,6 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
-use rand::{TryRngCore, rngs::OsRng};
+use rand08::rngs::OsRng as OsRng08;
+use rand::{rngs::OsRng, TryRngCore};
+use x25519_dalek::{EphemeralSecret, PublicKey};
+use x25519_dalek::SharedSecret;
 
 use crate::{
     constants::KEX_COOKIE_SIZE,
@@ -170,4 +173,15 @@ fn find_match(client_list: &[String], server_list: &[String]) -> Option<String> 
         .iter()
         .find(|algo| server_set.contains(*algo))
         .cloned()
+}
+
+pub fn generate_public_private() -> (EphemeralSecret, PublicKey) {
+    let secret = EphemeralSecret::new(OsRng08);
+    let public = PublicKey::from(&secret);
+
+    (secret, public)
+}
+
+pub fn generate_shared(secret: EphemeralSecret, other_pub: PublicKey) -> SharedSecret {
+    secret.diffie_hellman(&other_pub)
 }

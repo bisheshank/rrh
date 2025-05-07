@@ -21,3 +21,30 @@ pub mod msg {
     pub const KEXDH_INIT: u8 = 30;
     pub const KEXDH_REPLY: u8 = 31;
 }
+
+pub mod host_keys {
+    pub const PUBLIC_SERVER_HOST_KEY: [u8; 32] = [
+        88, 132, 250, 11, 239, 163, 187, 23,
+        213, 42, 75, 233, 31, 160, 101, 240,
+        154, 103, 40, 60, 84, 14, 209, 5,
+        96, 199, 159, 210, 132, 248, 110, 33
+    ];
+}
+
+pub mod reason_codes {
+    pub const SSH_DISCONNECT_HOST_NOT_ALLOWED_TO_CONNECT: u32 = 1;
+    pub const SSH_DISCONNECT_PROTOCOL_ERROR: u32 = 2;
+    pub const SSH_DISCONNECT_KEY_EXCHANGE_FAILED: u32 = 3;
+    pub const SSH_DISCONNECT_RESERVED: u32 = 4;
+    pub const SSH_DISCONNECT_MAC_ERROR: u32 = 5;
+    pub const SSH_DISCONNECT_COMPRESSION_ERROR: u32 = 6;
+    pub const SSH_DISCONNECT_SERVICE_NOT_AVAILABLE: u32 = 7;
+    pub const SSH_DISCONNECT_PROTOCOL_VERSION_NOT_SUPPORTED: u32 = 8;
+    pub const SSH_DISCONNECT_HOST_KEY_NOT_VERIFIABLE: u32 = 9;
+    pub const SSH_DISCONNECT_CONNECTION_LOST: u32 = 10;
+    pub const SSH_DISCONNECT_BY_APPLICATION: u32 = 11;
+    pub const SSH_DISCONNECT_TOO_MANY_CONNECTIONS: u32 = 12;
+    pub const SSH_DISCONNECT_AUTH_CANCELLED_BY_USER: u32 = 13;
+    pub const SSH_DISCONNECT_NO_MORE_AUTH_METHODS_AVAILABLE: u32 = 14;
+    pub const SSH_DISCONNECT_ILLEGAL_USER_NAME: u32 = 15;
+}

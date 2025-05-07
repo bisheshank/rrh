@@ -67,5 +67,3 @@ async fn handle_connection(stream: TcpStream, config: SshConfig) -> SshResult<()
 
     Ok(())
 }
-
-

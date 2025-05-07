@@ -1,18 +1,20 @@
 use bytes::Bytes;
 use log::{debug, info};
+use sha1::{Sha1, Digest};
 
 use core::fmt;
 use std::io::Write;
 use tokio::net::TcpStream;
 
+use std::fs::File;
+
 use crate::{
-    config::SshConfig,
-    error::{SshError, SshResult},
-    kex::create_kexinit_message,
-    message::Message,
-    ssh_codec::SshPacket,
-    transport::Transport,
+    config::SshConfig, 
+    constants::{host_keys::PUBLIC_SERVER_HOST_KEY, reason_codes::{self, SSH_DISCONNECT_BY_APPLICATION, SSH_DISCONNECT_HOST_KEY_NOT_VERIFIABLE}}, error::{SshError, SshResult}, kex::create_kexinit_message, message::Message, ssh_codec::SshPacket, transport::Transport
 };
+
+use x25519_dalek::{EphemeralSecret, PublicKey, SharedSecret};
+use crate::kex::{generate_public_private, generate_shared};
 
 #[derive(PartialEq, Clone, Copy)]
 pub enum SshState {
@@ -106,7 +108,7 @@ impl fmt::Display for SshEvent {
 pub struct SshStateMachine {
     state: SshState,
     transport: Transport,
-    is_client: bool,
+    is_client: bool
 }
 
 impl SshStateMachine {
@@ -116,7 +118,7 @@ impl SshStateMachine {
         Ok(SshStateMachine {
             state: SshState::Initial,
             transport,
-            is_client,
+            is_client
         })
     }
 
@@ -374,9 +376,15 @@ impl SshStateMachine {
         // TODO: Implement Diffie-Hellman key exchange
         // This would generate a DH key pair, send public key
 
-        Err(SshError::NotImplemented(
-            "KEXDH_INIT not implemented".into(),
-        ))
+        // TODO: Need to store client secret key
+        let (secret, public) = generate_public_private();
+        
+        let public_bytes = public.as_bytes().to_vec(); 
+        let dhinit_message = Message::KexDhInit { e: (public_bytes) };
+
+        self.transport.send_message(dhinit_message).await?;
+
+        Ok(())
     }
 
     async fn receive_dh_reply(&mut self) -> SshResult<()> {
@@ -390,6 +398,30 @@ impl SshStateMachine {
 
         // TODO: Implement DH key exchange completion
         // This would process the server's reply, verify host key, compute shared secret
+        let dhreply_msg = self.transport.receive_message().await?;
+
+        match dhreply_msg {
+            //verify host key
+            Message::KexDhReply { k_s, f, signature } => {
+                if k_s != PUBLIC_SERVER_HOST_KEY.as_ref() {
+                    return Err(SshError::Protocol("Server host key verification failed".into()));
+                }
+
+                let slice_u8: &[u8; 32];
+                if k_s.len() == 32 {
+                    slice_u8 = k_s.as_slice().try_into().expect("Failed to convert");
+                } else {
+                    return Err(SshError::Protocol("Host key received was not of the right length".into()));
+                }
+
+                let server_public_key = PublicKey::from(*slice_u8); 
+                //would now need to verify the signature, and then compute the shared secret 
+            },
+            _ => {
+                return Err(SshError::Protocol("Expected KEXDH_REPLY".into()));
+            }
+        }
+
 
         Err(SshError::NotImplemented(
             "KEXDH_REPLY not implemented".into(),
@@ -407,10 +439,23 @@ impl SshStateMachine {
 
         // TODO: Implement server-side DH key exchange
         // This would receive client's public key
+        let dhinit_msg = self.transport.receive_message().await?;
 
-        Err(SshError::NotImplemented(
-            "KEXDH_INIT receive not implemented".into(),
-        ))
+        //after receiving dhinit message from client, writes the public key to a file in the client_keys
+        //directory, returns an error if the wrong message type was received
+        match dhinit_msg {
+            Message::KexDhInit { e } => {
+                // Ensure the key is 32 bytes
+                let key_bytes: [u8; 32] = e.as_slice().try_into().map_err(|_| {
+                    SshError::Protocol("Invalid client public key size".into())
+                })?;
+    
+                self.transport.session_keys.client_public = Some(key_bytes);
+            }
+            _ => return Err(SshError::Protocol("Expected KEXDH_INIT message".into())),
+        };
+
+        Ok(())
     }
 
     async fn send_dh_reply(&mut self) -> SshResult<()> {
@@ -425,15 +470,88 @@ impl SshStateMachine {
         // TODO: Implement server's DH reply
         // This would sign and send the server's host key and public key
 
-        Err(SshError::NotImplemented(
-            "KEXDH_REPLY not implemented".into(),
-        ))
+        let (server_secret, server_public) = generate_public_private();
+        let public_bytes = server_public.as_bytes().to_vec(); 
+
+        let mut hasher = Sha1::new();
+
+        let V_C = self.transport.config.client_version.as_deref().unwrap_or("").as_bytes();
+        let V_S = self.transport.config.server_version.as_deref().unwrap_or("").as_bytes();
+
+
+        let I_C = self.transport.config.client_kexinit.as_deref().unwrap_or(&[]);
+        let I_S = self.transport.config.server_kexinit.as_deref().unwrap_or(&[]);
+
+        let K_S = &PUBLIC_SERVER_HOST_KEY;
+        
+        let e = self.transport.session_keys.client_public.as_ref().map(|val| val as &[u8]).unwrap_or(&[]);
+        let f = server_public.as_bytes();
+
+        let client_pub_bytes = self.transport.session_keys.client_public.as_ref().expect("Missing client key");
+
+        let client_public = PublicKey::from(*client_pub_bytes);
+        let shared_secret = server_secret.diffie_hellman(&client_public);
+        
+        let K = shared_secret.as_bytes();
+
+        hasher.update(V_C);
+        hasher.update(V_S);
+        hasher.update(I_C);
+        hasher.update(I_S);
+        hasher.update(K_S);
+        hasher.update(e);
+        hasher.update(f);
+        hasher.update(K);
+
+        let hash_result = hasher.finalize();
+        let signature_hash = hash_result.to_vec();
+
+        //instead of just sending the hash, i need to sign with host keypair and send the signature
+
+        let dh_reply_message = Message::KexDhReply { 
+            k_s: PUBLIC_SERVER_HOST_KEY.to_vec(), 
+            f: public_bytes, 
+            signature: signature_hash 
+        };
+
+        self.transport.send_message(dh_reply_message).await?;
+
+        Ok(())
     }
 
     async fn disconnect(&mut self) -> SshResult<()> {
         info!("Disconnecting");
 
         // TODO: Send disconnect message
+        let description;
+
+        if self.is_client {
+            description = "Client is disconnecting".to_string();
+        } else {
+            description = "Server is disconnecting".to_string();
+        }
+
+        let disconnect_message = Message::Disconnect { 
+            reason_code: (SSH_DISCONNECT_BY_APPLICATION), 
+            description: (description), 
+            language_tag: ("en-US".to_string()) 
+        };
+
+        self.transport.send_message(disconnect_message).await?;
+
+        Ok(())
+    }
+
+    async fn custom_disconnect(&mut self, reason_code: u32, description: String, language_tag: String) -> SshResult<()> {
+        info!("Disconnecting");
+
+        let disconnect_message = Message::Disconnect { 
+            reason_code: (reason_code), 
+            description: (description), 
+            language_tag: (language_tag) 
+        };
+
+        self.transport.send_message(disconnect_message).await?;
 
         Ok(())
     }

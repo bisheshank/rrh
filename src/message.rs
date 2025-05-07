@@ -8,11 +8,12 @@ use crate::{
     ssh_codec::SshPacket,
 };
 
+#[derive(Debug)]
 pub enum Message {
     Disconnect {
         reason_code: u32,
         description: String,
-        langauge_tag: String,
+        language_tag: String,
     },
     Unimplemented {
         sequence_number: u32,
@@ -62,7 +63,7 @@ impl Message {
                 buffer.put_u32(*sequence_number);
 
                 Ok(SshPacket::new(msg::UNIMPLEMENTED, buffer.freeze()))
-            }
+            },
             Message::KexInit {
                 cookie,
                 kex_algorithms,
@@ -104,7 +105,28 @@ impl Message {
                 buffer.put_u32(*reserved);
 
                 Ok(SshPacket::new(msg::KEXINIT, buffer.freeze()))
-            }
+            },
+            Message::KexDhInit { e } => {
+                let mut buffer = BytesMut::new();
+                buffer.put_u32(e.len() as u32);
+                buffer.put_slice(e);
+
+                Ok(SshPacket::new(msg::KEXDH_INIT, buffer.freeze()))
+            },
+            Message::KexDhReply { k_s, f, signature } => {
+                let mut buffer = BytesMut::new();
+
+                buffer.put_u32(k_s.len() as u32); 
+                buffer.put_slice(k_s); 
+
+                buffer.put_u32(f.len() as u32); 
+                buffer.put_slice(f); 
+
+                buffer.put_u32(signature.len() as u32); 
+                buffer.put_slice(signature); 
+               
+                Ok(SshPacket::new(msg::KEXDH_REPLY, buffer.freeze()))
+            },
             _ => Ok(SshPacket::new(1, Bytes::default())),
         }
     }
@@ -130,7 +152,7 @@ impl Message {
                 let sequence_number = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
 
                 Ok(Message::Unimplemented { sequence_number })
-            }
+            },
             msg::KEXINIT => {
                 if data.len() < KEX_COOKIE_SIZE {
                     return Err(SshError::Protocol("KEXINIT message too short".to_string()));
@@ -200,7 +222,57 @@ impl Message {
                     first_kex_packet_follows,
                     reserved,
                 })
-            }
+            },
+            msg::KEXDH_INIT => {
+                if data.len() < 4 {
+                    return Err(SshError::Protocol("KEXDH_INIT message too short".to_string()));
+                }
+            
+                let mut reader = Bytes::copy_from_slice(&data);
+            
+                let len = reader.get_u32() as usize;
+            
+                if reader.remaining() < len {
+                    return Err(SshError::Protocol("KEXDH_INIT e field truncated".to_string()));
+                }
+            
+                let e = reader.split_to(len).to_vec();
+            
+                Ok(Message::KexDhInit { e })
+            },
+            msg::KEXDH_REPLY => {
+                if data.len() < 12 { 
+                    return Err(SshError::Protocol("KEXDH_REPLY message too short".to_string()));
+                }
+
+                let mut reader = Bytes::copy_from_slice(&data);
+
+                let k_s_len = reader.get_u32() as usize;
+
+                if reader.remaining() < k_s_len {
+                    return Err(SshError::Protocol("KEXDH_REPLY k_s field truncated".to_string()));
+                }
+
+                let k_s = reader.split_to(k_s_len).to_vec();
+
+                let f_len = reader.get_u32() as usize;
+                
+                if reader.remaining() < f_len {
+                    return Err(SshError::Protocol("KEXDH_REPLY f field truncated".to_string()));
+                }
+
+                let f = reader.split_to(f_len).to_vec();
+
+                let signature_len = reader.get_u32() as usize;
+                
+                if reader.remaining() < signature_len {
+                    return Err(SshError::Protocol("KEXDH_REPLY signature field truncated".to_string()));
+                }
+
+                let signature = reader.split_to(signature_len).to_vec();
+
+                Ok(Message::KexDhReply { k_s: k_s, f: f, signature: signature })
+            },
             _ => Ok(Message::Unimplemented { sequence_number: 0 }),
         }
     }
