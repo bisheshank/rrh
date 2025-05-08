@@ -744,7 +744,121 @@ impl SshStateMachine {
         info!("Sending SERVICE_REQUEST for service: {}", service_name);
 
         let service_request = Message::ServiceRequest { service_name: service_name };
-        let mut packet = service_request.to_packet()?;
+        let packet = self.encrypt_packet(&service_request)?;
+
+        self.transport.send_encrypted_message(service_request, packet).await?;
+
+        Ok(())
+    }
+
+    async fn receive_service_request(&mut self) -> SshResult<()> {
+        if self.is_client {
+            return Err(SshError::Protocol(
+                "Only the server can receive service requests".into(),
+            ));
+        }
+
+        let encrypted_packet = self.transport.receive_packet().await?;
+        let decrypted_packet = self.decrypt_packet(encrypted_packet)?;
+
+        let message = Message::from_packet(&decrypted_packet)?;
+
+        match message {
+            Message::ServiceRequest { service_name } => {
+                if service_name == "ssh-userauth" || service_name == "ssh-connection" {
+                    println!("Received SERVICE_REQUEST for service: {}", service_name);
+                } else {
+                    return Err(SshError::Protocol(format!("Server does not support service: {}", service_name)))
+                }
+            },
+            _ => {
+                return Err(SshError::Protocol("Expected SERVICE_REQUEST message".into()))
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn send_service_accept(&mut self, service_name: String) -> SshResult<()> {
+        if self.is_client {
+            return Err(SshError::Protocol(
+                "Only the server can accept service requests".into(),
+            ));
+        }
+
+        info!("Sending SERVICE_ACCEPT for service: {}", service_name);
+
+        let service_accept = Message::ServiceAccept { service_name: service_name };
+        let packet = self.encrypt_packet(&service_accept)?;
+
+        self.transport.send_encrypted_message(service_accept, packet).await?;
+
+        Ok(())
+    }
+
+    async fn receive_service_accept(&mut self) -> SshResult<()> {
+        if !self.is_client {
+            return Err(SshError::Protocol(
+                "Only the client can receive service accepts".into(),
+            ));
+        }
+
+        let encrypted_packet = self.transport.receive_packet().await?;
+        let decrypted_packet = self.decrypt_packet(encrypted_packet)?;
+
+        let message = Message::from_packet(&decrypted_packet)?;
+
+        match message {
+            Message::ServiceAccept { service_name } => {
+                println!("Received SERVICE_ACCEPT for service: {}", service_name);
+            },
+            _ => {
+                return Err(SshError::Protocol("Expected SERVICE_ACCEPT message".into()))
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn disconnect(&mut self) -> SshResult<()> {
+        info!("Disconnecting");
+
+        // TODO: Send disconnect message
+        let description;
+
+        if self.is_client {
+            description = "Client is disconnecting".to_string();
+        } else {
+            description = "Server is disconnecting".to_string();
+        }
+
+        let disconnect_message = Message::Disconnect { 
+            reason_code: (SSH_DISCONNECT_BY_APPLICATION), 
+            description: (description), 
+            language_tag: ("en-US".to_string()) 
+        };
+
+        self.transport.send_message(disconnect_message).await?;
+
+        Ok(())
+    }
+
+    // async fn custom_disconnect(&mut self, reason_code: u32, description: String, language_tag: String) -> SshResult<()> {
+    //     info!("Disconnecting");
+
+    //     let disconnect_message = Message::Disconnect { 
+    //         reason_code: (reason_code), 
+    //         description: (description), 
+    //         language_tag: (language_tag) 
+    //     };
+
+    //     self.transport.send_message(disconnect_message).await?;
+
+    //     Ok(())
+    // }
+
+    fn encrypt_packet(&mut self, message: &Message) -> SshResult<SshPacket> {
+        let mut packet = message.to_packet()?;
 
         let payload = packet.payload;
         
@@ -783,19 +897,10 @@ impl SshStateMachine {
         let encrypted_payload = output.freeze();
         packet.payload = encrypted_payload;
 
-        self.transport.send_encrypted_message(service_request, packet).await?;
-
-        Ok(())
+        Ok(packet)
     }
 
-    async fn receive_service_request(&mut self) -> SshResult<()> {
-        if self.is_client {
-            return Err(SshError::Protocol(
-                "Only the server can receive service requests".into(),
-            ));
-        }
-
-        let mut packet = self.transport.receive_packet().await?;
+    fn decrypt_packet(&mut self, mut packet: SshPacket) -> SshResult<SshPacket> {
         let encrypted_payload = packet.payload;
 
         let key = self.transport.session.new_keys.key_s2c.as_ref().ok_or(SshError::Protocol("Missing decryption key".into()))?;
@@ -845,76 +950,6 @@ impl SshStateMachine {
 
         packet.payload = payload_bytes;
 
-        let message = Message::from_packet(&packet)?;
-
-        match message {
-            Message::ServiceRequest { service_name } => {
-                if service_name == "ssh-userauth" || service_name == "ssh-connection" {
-                    println!("Received SERVICE_REQUEST for service: {}", service_name);
-                } else {
-                    return Err(SshError::Protocol(format!("Server does not support service: {}", service_name)))
-                }
-            },
-            _ => {
-                return Err(SshError::Protocol("Expected SERVICE_REQUEST message".into()))
-            }
-        }
-
-        Ok(())
+        Ok(packet)
     }
-
-    async fn send_service_accept(&mut self) -> SshResult<()> {
-        if self.is_client {
-            return Err(SshError::Protocol(
-                "Only the server can accept service requests".into(),
-            ));
-        }
-        Ok(())
-    }
-
-    async fn receive_service_accept(&mut self) -> SshResult<()> {
-        if !self.is_client {
-            return Err(SshError::Protocol(
-                "Only the client can receive service accepts".into(),
-            ));
-        }
-        Ok(())
-    }
-
-    async fn disconnect(&mut self) -> SshResult<()> {
-        info!("Disconnecting");
-
-        // TODO: Send disconnect message
-        let description;
-
-        if self.is_client {
-            description = "Client is disconnecting".to_string();
-        } else {
-            description = "Server is disconnecting".to_string();
-        }
-
-        let disconnect_message = Message::Disconnect { 
-            reason_code: (SSH_DISCONNECT_BY_APPLICATION), 
-            description: (description), 
-            language_tag: ("en-US".to_string()) 
-        };
-
-        self.transport.send_message(disconnect_message).await?;
-
-        Ok(())
-    }
-
-    // async fn custom_disconnect(&mut self, reason_code: u32, description: String, language_tag: String) -> SshResult<()> {
-    //     info!("Disconnecting");
-
-    //     let disconnect_message = Message::Disconnect { 
-    //         reason_code: (reason_code), 
-    //         description: (description), 
-    //         language_tag: (language_tag) 
-    //     };
-
-    //     self.transport.send_message(disconnect_message).await?;
-
-    //     Ok(())
-    // }
 }
