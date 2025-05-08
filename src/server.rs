@@ -69,5 +69,7 @@ async fn handle_connection(stream: TcpStream, config: SshConfig) -> SshResult<()
     state_machine.process_event(SshEvent::SendNewKeys).await?;
     state_machine.process_event(SshEvent::ReceiveNewKeys).await?;
 
+    state_machine.process_event(SshEvent::ReceiveAuthRequest).await?;
+
     Ok(())
 }

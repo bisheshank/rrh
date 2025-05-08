@@ -13,7 +13,7 @@ use crate::{
     ssh_codec::SshPacket,
 };
 
-use x25519_dalek::{EphemeralSecret};
+use x25519_dalek::EphemeralSecret;
 
 pub struct Transport {
     // All config values
@@ -126,7 +126,21 @@ impl Transport {
         Ok(())
     }
 
-    pub async fn receive_message(&mut self) -> SshResult<Message> {
+    pub async fn send_encrypted_message(&mut self, message: Message, mut packet: SshPacket) -> SshResult<()> {
+        debug!("Sending encrypted message: {}", message);
+
+        packet.sequence_number = self.send_sequence_number;
+        let data = packet.encode()?;
+
+        self.writer.write_all(&data).await?;
+        self.writer.flush().await?;
+
+        self.send_sequence_number = self.send_sequence_number.wrapping_add(1);
+
+        Ok(())
+    }
+
+    pub async fn receive_packet(&mut self) -> Result<SshPacket, SshError> {
         let mut length_buf = [0u8; 4];
         self.reader.read_exact(&mut length_buf).await?;
 
@@ -147,7 +161,13 @@ impl Transport {
         full_packet.put_u32(packet_length);
         full_packet.extend_from_slice(&packet_buf);
 
-        let mut packet = SshPacket::decode(full_packet.freeze())?;
+        let packet = SshPacket::decode(full_packet.freeze())?;
+
+        Ok(packet)
+    }
+
+    pub async fn receive_message(&mut self) -> SshResult<Message> {
+        let mut packet = self.receive_packet().await?;
 
         packet.sequence_number = self.recv_sequence_number;
         self.recv_sequence_number = self.recv_sequence_number.wrapping_add(1);

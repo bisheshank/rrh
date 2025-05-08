@@ -196,7 +196,7 @@ pub fn generate_new_key(k: &[u8; 32], exchange_hash: &Vec<u8>, session_id: &Vec<
     hasher.update(&[id_byte]);
     hasher.update(&session_id);
 
-    let new_key = hasher.finalize().to_vec();
+    let new_key = hasher.finalize()[..16].to_vec(); //need to truncate for aes
 
     return new_key;
 }

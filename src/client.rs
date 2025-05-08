@@ -45,6 +45,8 @@ impl SshClient {
 
         println!("Successfully connected to {}", address);
 
+        state_machine.process_event(SshEvent::RequestAuth).await?;
+
         Ok(Self { state_machine })
     }
 }

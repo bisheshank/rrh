@@ -1,4 +1,4 @@
-use bytes::Bytes;
+use bytes::{BufMut, BytesMut, Bytes, Buf};
 use log::info;
 use sha1::{Sha1, Digest};
 
@@ -11,7 +11,14 @@ use crate::{
 
 use x25519_dalek::PublicKey;
 use ed25519_dalek::{SigningKey, Signature, Verifier, Signer, VerifyingKey};
+use aes::Aes128;
+use ctr::cipher::{KeyIvInit, StreamCipher};
+use hmac::{Hmac, Mac};
 use crate::kex::{generate_public_private, generate_shared, generate_new_key};
+
+type Aes128Ctr = ctr::Ctr128BE<Aes128>;
+type HmacSha1 = Hmac<Sha1>;
+
 
 #[derive(PartialEq, Clone, Copy)]
 pub enum SshState {
@@ -228,6 +235,18 @@ impl SshStateMachine {
             (SshState::NewKeysSent, SshEvent::ReceiveNewKeys) => {
                 self.receive_newkeys().await?;
                 self.state = SshState::NewKeysReceived;
+            }
+
+            //client only
+            (SshState::NewKeysReceived, SshEvent::RequestAuth) if self.is_client => {
+                self.send_service_request("auth".into()).await?;
+                self.state = SshState::AuthRequested;
+            }
+
+            //server only
+            (SshState::NewKeysReceived, SshEvent::ReceiveAuthRequest) if !self.is_client => {
+                self.receive_service_request().await?;
+                self.state = SshState::AuthInProgress;
             }
 
             // Error and disconnect transitions
@@ -556,8 +575,7 @@ impl SshStateMachine {
         // This would receive client's public key
         let dhinit_msg = self.transport.receive_message().await?;
 
-        //after receiving dhinit message from client, writes the public key to a file in the client_keys
-        //directory, returns an error if the wrong message type was received
+        //after receiving dhinit message from client, stores client_public in session
         match dhinit_msg {
             Message::KexDhInit { e } => {
                 // Ensure the key is 32 bytes
@@ -674,12 +692,28 @@ impl SshStateMachine {
                     .ok_or_else(|| SshError::Protocol("Missing session ID".into()))?
                     .clone();
 
-                let iv_c2s = generate_new_key(&k, &exchange_hash, &session_id, b'A');
-                let iv_s2c = generate_new_key(&k, &exchange_hash, &session_id, b'B');
-                let key_c2s = generate_new_key(&k, &exchange_hash, &session_id, b'C');
-                let key_s2c = generate_new_key(&k, &exchange_hash, &session_id, b'D');
-                let mac_c2s = generate_new_key(&k, &exchange_hash, &session_id, b'E');
-                let mac_s2c = generate_new_key(&k, &exchange_hash, &session_id, b'F');
+                let iv_c2s;
+                let iv_s2c;
+                let key_c2s;
+                let key_s2c;
+                let mac_c2s;
+                let mac_s2c;
+
+                if self.is_client {
+                    iv_c2s = generate_new_key(&k, &exchange_hash, &session_id, b'A');
+                    iv_s2c = generate_new_key(&k, &exchange_hash, &session_id, b'B');
+                    key_c2s = generate_new_key(&k, &exchange_hash, &session_id, b'C');
+                    key_s2c = generate_new_key(&k, &exchange_hash, &session_id, b'D');
+                    mac_c2s = generate_new_key(&k, &exchange_hash, &session_id, b'E');
+                    mac_s2c = generate_new_key(&k, &exchange_hash, &session_id, b'F');
+                } else {
+                    iv_c2s = generate_new_key(&k, &exchange_hash, &session_id, b'B');
+                    iv_s2c = generate_new_key(&k, &exchange_hash, &session_id, b'A');
+                    key_c2s = generate_new_key(&k, &exchange_hash, &session_id, b'D');
+                    key_s2c = generate_new_key(&k, &exchange_hash, &session_id, b'C');
+                    mac_c2s = generate_new_key(&k, &exchange_hash, &session_id, b'F');
+                    mac_s2c = generate_new_key(&k, &exchange_hash, &session_id, b'E');
+                }
 
                 let new_keys = NewKeys {
                     iv_c2s: Some(iv_c2s),
@@ -695,6 +729,130 @@ impl SshStateMachine {
                 self.transport.session.new_keys = new_keys;
             },
             _ => return Err(SshError::Protocol("Expected SSH_MSG_NEWKEYS message".into())),
+        }
+
+        Ok(())
+    }
+
+    async fn send_service_request(&mut self, service_name: String) -> SshResult<()> {
+        if !self.is_client {
+            return Err(SshError::Protocol(
+                "Only clients can send service requests".into(),
+            ));
+        }
+        
+        info!("Sending SERVICE_REQUEST for service: {}", service_name);
+
+        let service_request = Message::ServiceRequest { service_name: service_name };
+        let mut packet = service_request.to_packet()?;
+
+        let payload = packet.payload;
+        
+        let key = self.transport.session.new_keys.key_c2s.as_ref().ok_or(SshError::Protocol("Missing encryption key".into()))?;
+        let iv = self.transport.session.new_keys.iv_c2s.as_ref().ok_or(SshError::Protocol("Missing IV".into()))?;
+        let mac_key = self.transport.session.new_keys.mac_c2s.as_ref().ok_or(SshError::Protocol("Missing MAC key".into()))?;
+
+        let block_size = 16;
+        let padding_len = block_size - ((1 + payload.len()) % block_size);
+        let packet_len = 1 + payload.len() + padding_len;
+
+        let mut packet_buf = BytesMut::with_capacity(4 + packet_len);
+        packet_buf.put_u32(packet_len as u32);  
+        packet_buf.put_u8(padding_len as u8);      
+        packet_buf.extend_from_slice(&payload);    
+        packet_buf.extend_from_slice(&vec![0u8; padding_len]); 
+
+        let mut encrypted = packet_buf.split_off(4);
+        let mut cipher = Aes128Ctr::new_from_slices(key, iv).map_err(|_| SshError::Protocol("Bad IV or key".into()))?;
+        cipher.apply_keystream(&mut encrypted);
+
+        let mut output = BytesMut::with_capacity(4 + encrypted.len() + 32);
+        output.put_u32(packet_len as u32); 
+        output.extend_from_slice(&encrypted);
+
+        let mut mac = HmacSha1::new_from_slice(mac_key).map_err(|_| SshError::Protocol("Bad MAC key".into()))?;
+        let mut seq_buf = [0u8; 4];
+        seq_buf.copy_from_slice(&packet.sequence_number.to_be_bytes());
+
+        mac.update(&seq_buf);
+        mac.update(&output);
+
+        let mac_bytes = mac.finalize().into_bytes();
+        output.extend_from_slice(&mac_bytes);
+
+        let encrypted_payload = output.freeze();
+        packet.payload = encrypted_payload;
+
+        self.transport.send_encrypted_message(service_request, packet).await?;
+
+        Ok(())
+    }
+
+    async fn receive_service_request(&mut self) -> SshResult<()> {
+        if self.is_client {
+            return Err(SshError::Protocol(
+                "Only the server can receive service requests".into(),
+            ));
+        }
+
+        let mut packet = self.transport.receive_packet().await?;
+        let encrypted_payload = packet.payload;
+
+        let key = self.transport.session.new_keys.key_s2c.as_ref().ok_or(SshError::Protocol("Missing decryption key".into()))?;
+        let iv = self.transport.session.new_keys.iv_s2c.as_ref().ok_or(SshError::Protocol("Missing IV".into()))?;
+        let mac_key = self.transport.session.new_keys.mac_s2c.as_ref().ok_or(SshError::Protocol("Missing MAC key".into()))?;
+        
+        let mut cursor = std::io::Cursor::new(&encrypted_payload);
+
+        let packet_len = cursor.get_u32() as usize;
+
+        let encrypted_part_len = packet_len; 
+        let total_len = 4 + encrypted_part_len;
+        let mac_len = 20; // for SHA1
+
+        if encrypted_payload.len() < total_len + mac_len {
+            return Err(SshError::Protocol("Packet too short".into()));
+        }
+
+        let encrypted_data = &encrypted_payload[4..total_len];
+        let received_mac = &encrypted_payload[total_len..(total_len + mac_len)];
+
+        let mut mac = HmacSha1::new_from_slice(mac_key).map_err(|_| SshError::Protocol("Bad MAC key".into()))?;
+        let mut seq_buf = [0u8; 4];
+        seq_buf.copy_from_slice(&packet.sequence_number.to_be_bytes());
+
+        mac.update(&seq_buf);
+        mac.update(&encrypted_payload[..total_len]);
+
+        let expected_mac = mac.finalize().into_bytes();
+        if expected_mac.as_slice() != received_mac {
+            return Err(SshError::Protocol("MAC verification failed".into()));
+        }
+
+        // Decrypt
+        let mut decrypted = encrypted_data.to_vec();
+        let mut cipher = Aes128Ctr::new_from_slices(key, iv).map_err(|_| SshError::Protocol("Bad IV or key".into()))?;
+        cipher.apply_keystream(&mut decrypted);
+
+        let padding_len = decrypted[0] as usize;
+
+        if decrypted.len() < 1 + padding_len {
+            return Err(SshError::Protocol("Decrypted data too short".into()));
+        }
+        let payload = &decrypted[1..(decrypted.len() - padding_len)];
+        let payload_bytes = Bytes::copy_from_slice(payload);
+
+        packet.payload = payload_bytes;
+
+        let message = Message::from_packet(&packet)?;
+
+        match message {
+            Message::ServiceRequest { service_name } => {
+                println!("Received SERVICE_REQUEST for service: {}", service_name);
+            },
+            _ => {
+                return Err(SshError::Protocol("Expected SERVICE_REQUEST message".into()))
+            }
         }
 
         Ok(())
