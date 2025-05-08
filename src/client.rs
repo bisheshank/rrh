@@ -37,6 +37,10 @@ impl SshClient {
             .process_event(SshEvent::ReceiveDhReply)
             .await?;
 
+        //activate new keys
+        state_machine.process_event(SshEvent::SendNewKeys).await?;
+        state_machine.process_event(SshEvent::ReceiveNewKeys).await?;
+
         info!("Version exchange successful");
 
         println!("Successfully connected to {}", address);

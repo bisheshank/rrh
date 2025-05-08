@@ -26,14 +26,16 @@ pub struct Transport {
     // Packet sequencing
     send_sequence_number: u32,
     recv_sequence_number: u32,
-    pub session_keys: SessionKeys
+    pub session: Session
 }
 
 //new struct for server to store necessary keys
-pub struct SessionKeys {
+pub struct Session {
     pub shared_key: Option<[u8; 32]>, 
     pub client_public: Option<[u8; 32]>,
     pub secret: Option<EphemeralSecret>, //need to store secret for computing shared secret
+    pub session_id: Option<Vec<u8>>,
+    pub exchange_hash: Option<Vec<u8>>
 }
 
 impl Transport {
@@ -44,10 +46,12 @@ impl Transport {
         // Create a BufReader for the reader half
         let reader = BufReader::new(reader);
 
-        let session_keys = SessionKeys {
+        let session = Session {
             shared_key: None,
             client_public: None,
-            secret: None
+            secret: None,
+            session_id: None,
+            exchange_hash: None,
         };
 
         Ok(Transport {
@@ -57,7 +61,7 @@ impl Transport {
             is_client,
             send_sequence_number: 0,
             recv_sequence_number: 0,
-            session_keys
+            session
         })
     }
 

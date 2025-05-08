@@ -41,6 +41,7 @@ pub enum Message {
         f: Vec<u8>,         // Server's ephemeral public key
         signature: Vec<u8>, // Signature of the exchange hash
     },
+    NewKeys,
 }
 
 impl fmt::Display for Message {
@@ -51,6 +52,7 @@ impl fmt::Display for Message {
             Message::KexInit { .. } => write!(f, "KEXINIT"),
             Message::KexDhInit { .. } => write!(f, "KEXDH_INIT"),
             Message::KexDhReply { .. } => write!(f, "KEXDH_REPLY"),
+            Message::NewKeys { .. } => write!(f, "SSH_MSG_NEWKEYS"),
         }
     }
 }
@@ -126,6 +128,9 @@ impl Message {
                 buffer.put_slice(signature); 
                
                 Ok(SshPacket::new(msg::KEXDH_REPLY, buffer.freeze()))
+            },
+            Message::NewKeys => {
+                Ok(SshPacket::new(msg::SSH_MSG_NEWKEYS, Bytes::new()))
             },
             _ => Ok(SshPacket::new(1, Bytes::default())),
         }
@@ -272,6 +277,9 @@ impl Message {
                 let signature = reader.split_to(signature_len).to_vec();
 
                 Ok(Message::KexDhReply { k_s: k_s, f: f, signature: signature })
+            },
+            msg::SSH_MSG_NEWKEYS => {
+                Ok(Message::NewKeys)
             },
             _ => Ok(Message::Unimplemented { sequence_number: 0 }),
         }

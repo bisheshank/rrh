@@ -29,7 +29,6 @@ pub enum SshState {
     NewKeysSent,
     NewKeysReceived,
     KeysExchanged,
-    
 
     // Authentication states
     AuthRequested,
@@ -211,6 +210,24 @@ impl SshStateMachine {
             (SshState::DhInitReceived, SshEvent::SendDhReply) if !self.is_client => {
                 self.send_dh_reply().await?;
                 self.state = SshState::DhReplySent;
+            }
+
+            //new keys transition (client)
+            (SshState::DhReplyReceived, SshEvent::SendNewKeys) if self.is_client => {
+                self.send_newkeys().await?;
+                self.state = SshState::NewKeysSent;
+            }
+
+            //new keys transition (server)
+            (SshState::DhReplySent, SshEvent::SendNewKeys) if !self.is_client => {
+                self.send_newkeys().await?;
+                self.state = SshState::NewKeysSent;
+            }
+
+            //sent to receive new keys transition
+            (SshState::NewKeysSent, SshEvent::ReceiveNewKeys) => {
+                self.receive_newkeys().await?;
+                self.state = SshState::NewKeysReceived;
             }
 
             // Error and disconnect transitions
@@ -418,9 +435,9 @@ impl SshStateMachine {
         // TODO: Need to store client secret key
         let (secret, public) = generate_public_private();
 
-        self.transport.session_keys.secret = Some(secret);
+        self.transport.session.secret = Some(secret);
 
-        self.transport.session_keys.client_public = Some(*public.as_bytes());
+        self.transport.session.client_public = Some(*public.as_bytes());
         let public_bytes = public.as_bytes().to_vec(); 
         let dhinit_message = Message::KexDhInit { e: (public_bytes) };
 
@@ -460,7 +477,7 @@ impl SshStateMachine {
                 //would now need to verify the signature by recomputing the hash, and verifying against 
                 //the signature received
 
-                let client_secret = self.transport.session_keys.secret
+                let client_secret = self.transport.session.secret
                     .take()
                     .ok_or(SshError::Protocol("Missing client secret".into()))?;
 
@@ -481,7 +498,8 @@ impl SshStateMachine {
 
                 let k_s = &PUBLIC_SERVER_HOST_KEY;
                 
-                let e = self.transport.session_keys.client_public.as_ref().map(|val| val as &[u8]).unwrap_or(&[]);
+                let e = self.transport.session.client_public.as_ref()
+                    .map(|val| val as &[u8]).unwrap_or(&[]);
                 let f = server_public.as_bytes();
 
                 let k = shared_secret.as_bytes();
@@ -508,7 +526,13 @@ impl SshStateMachine {
                     .map_err(|_| SshError::Protocol("Signature verification failed".into()))?;
 
                 //signature verified, shared_key computed
-                self.transport.session_keys.shared_key = Some(*shared_secret.as_bytes());
+                self.transport.session.shared_key = Some(*shared_secret.as_bytes());
+                
+                self.transport.session.exchange_hash = Some(signature_hash.clone());
+
+                if self.transport.session.session_id == None {
+                    self.transport.session.session_id = Some(signature_hash);
+                }
             },
             _ => {
                 return Err(SshError::Protocol("Expected KEXDH_REPLY".into()));
@@ -541,7 +565,7 @@ impl SshStateMachine {
                     SshError::Protocol("Invalid client public key size".into())
                 })?;
     
-                self.transport.session_keys.client_public = Some(key_bytes);
+                self.transport.session.client_public = Some(key_bytes);
             }
             _ => return Err(SshError::Protocol("Expected KEXDH_INIT message".into())),
         };
@@ -575,10 +599,10 @@ impl SshStateMachine {
 
         let k_s = &PUBLIC_SERVER_HOST_KEY;
         
-        let e = self.transport.session_keys.client_public.as_ref().map(|val| val as &[u8]).unwrap_or(&[]);
+        let e = self.transport.session.client_public.as_ref().map(|val| val as &[u8]).unwrap_or(&[]);
         let f = server_public.as_bytes();
 
-        let client_pub_bytes = self.transport.session_keys.client_public.as_ref().expect("Missing client key");
+        let client_pub_bytes = self.transport.session.client_public.as_ref().expect("Missing client key");
 
         let client_public = PublicKey::from(*client_pub_bytes);
         let shared_secret = generate_shared(server_secret, client_public);
@@ -597,7 +621,6 @@ impl SshStateMachine {
         let hash_result = hasher.finalize();
         let signature_hash = hash_result.to_vec();
 
-        //instead of just sending the hash, i need to sign with host keypair and send the signature
         let signing_key = SigningKey::from_bytes(&PRIVATE_SERVER_HOST_KEY);
         let signature = signing_key.sign(&signature_hash).to_bytes().to_vec();
 
@@ -607,7 +630,36 @@ impl SshStateMachine {
             signature: signature 
         };
 
+        self.transport.session.exchange_hash = Some(signature_hash.clone());
+
+        if self.transport.session.session_id == None {
+            self.transport.session.session_id = Some(signature_hash);
+        }
+
         self.transport.send_message(dh_reply_message).await?;
+
+        Ok(())
+    }
+
+    async fn send_newkeys(&mut self) -> SshResult<()> {
+        info!("Sending SSH_MSG_NEWKEYS");
+
+        self.transport.send_message(Message::NewKeys).await?;
+
+        Ok(())
+    }
+
+    async fn receive_newkeys(&mut self) -> SshResult<()> {
+        info!("Receiving SSH_MSG_NEWKEYS");
+
+        let newkeys_msg = self.transport.receive_message().await?;
+
+        match newkeys_msg {
+            Message::NewKeys => {
+                //if this is received, should activate all the new keys: iv, enc, mac
+            },
+            _ => return Err(SshError::Protocol("Expected SSH_MSG_NEWKEYS message".into())),
+        }
 
         Ok(())
     }
@@ -635,17 +687,17 @@ impl SshStateMachine {
         Ok(())
     }
 
-    async fn custom_disconnect(&mut self, reason_code: u32, description: String, language_tag: String) -> SshResult<()> {
-        info!("Disconnecting");
+    // async fn custom_disconnect(&mut self, reason_code: u32, description: String, language_tag: String) -> SshResult<()> {
+    //     info!("Disconnecting");
 
-        let disconnect_message = Message::Disconnect { 
-            reason_code: (reason_code), 
-            description: (description), 
-            language_tag: (language_tag) 
-        };
+    //     let disconnect_message = Message::Disconnect { 
+    //         reason_code: (reason_code), 
+    //         description: (description), 
+    //         language_tag: (language_tag) 
+    //     };
 
-        self.transport.send_message(disconnect_message).await?;
+    //     self.transport.send_message(disconnect_message).await?;
 
-        Ok(())
-    }
+    //     Ok(())
+    // }
 }
