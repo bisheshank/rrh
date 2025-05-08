@@ -47,6 +47,10 @@ pub enum Message {
     }, 
     ServiceAccept {
         service_name: String
+    },
+    UsernamePassword {
+        username: String,
+        password: String,
     }
 }
 
@@ -60,7 +64,8 @@ impl fmt::Display for Message {
             Message::KexDhReply { .. } => write!(f, "KEXDH_REPLY"),
             Message::NewKeys { .. } => write!(f, "SSH_MSG_NEWKEYS"),
             Message::ServiceRequest { .. } => write!(f, "SERVICE_REQUEST"),
-            Message::ServiceAccept { .. } => write!(f, "SERVICE_ACCEPT")
+            Message::ServiceAccept { .. } => write!(f, "SERVICE_ACCEPT"),
+            Message::UsernamePassword { .. } => write!(f, "USERNAME_PASSWORD")
         }
     }
 }
@@ -155,6 +160,17 @@ impl Message {
                 buffer.put_slice(service_name.as_bytes());
                 
                 Ok(SshPacket::new(msg::SERVICE_ACCEPT, buffer.freeze()))
+            },
+            Message::UsernamePassword { username, password } => {
+                let mut buffer = BytesMut::new();
+
+                buffer.put_u32(username.len() as u32);
+                buffer.put_slice(username.as_bytes());
+
+                buffer.put_u32(password.len() as u32);
+                buffer.put_slice(password.as_bytes());
+                
+                Ok(SshPacket::new(msg::USERNAME_PASSWORD, buffer.freeze()))
             },
             _ => Ok(SshPacket::new(1, Bytes::default())),
         }
@@ -350,6 +366,41 @@ impl Message {
                 };
             
                 Ok(Message::ServiceAccept { service_name })
+            },
+            msg::USERNAME_PASSWORD => {
+                let mut reader = Bytes::copy_from_slice(&data);
+            
+                if reader.remaining() < 4 {
+                    return Err(SshError::Protocol("USERNAME_PASSWORD message too short for username length".to_string()));
+                }
+            
+                let username_len = reader.get_u32() as usize;
+                if reader.remaining() < username_len + 4 {
+                    return Err(SshError::Protocol("USERNAME_PASSWORD message too short for username or password length".to_string()));
+                }
+            
+                let username_bytes = reader.split_to(username_len);
+                let username = match std::str::from_utf8(&username_bytes) {
+                    Ok(s) => s.to_string(),
+                    Err(_) => {
+                        return Err(SshError::Protocol("USERNAME_PASSWORD username is not valid UTF-8".to_string()));
+                    }
+                };
+            
+                let password_len = reader.get_u32() as usize;
+                if reader.remaining() < password_len {
+                    return Err(SshError::Protocol("USERNAME_PASSWORD message too short for password".to_string()));
+                }
+            
+                let password_bytes = reader.split_to(password_len);
+                let password = match std::str::from_utf8(&password_bytes) {
+                    Ok(s) => s.to_string(),
+                    Err(_) => {
+                        return Err(SshError::Protocol("USERNAME_PASSWORD password is not valid UTF-8".to_string()));
+                    }
+                };
+            
+                Ok(Message::UsernamePassword { username, password })
             },
             _ => Ok(Message::Unimplemented { sequence_number: 0 }),
         }

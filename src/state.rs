@@ -4,6 +4,7 @@ use sha1::{Sha1, Digest};
 
 use core::fmt;
 use tokio::net::TcpStream;
+use std::io::{self, Write};
 
 use crate::{
     config::SshConfig, constants::{host_keys::{PRIVATE_SERVER_HOST_KEY, PUBLIC_SERVER_HOST_KEY}, reason_codes::{self, SSH_DISCONNECT_BY_APPLICATION, SSH_DISCONNECT_HOST_KEY_NOT_VERIFIABLE}}, error::{SshError, SshResult}, kex::create_kexinit_message, message::Message, ssh_codec::SshPacket, transport::Transport, transport::NewKeys
@@ -40,8 +41,11 @@ pub enum SshState {
     // Authentication states
     AuthRequested,
     AuthMethodNegotiated,
+    AuthAccepted,
     AuthInProgress,
     AuthSuccess,
+
+    ReceivedUsernamePassword,
 
     // Connection states
     ChannelOpening,
@@ -69,9 +73,11 @@ impl fmt::Display for SshState {
             SshState::NewKeysReceived => write!(f, "NewKeysReceived"),
             SshState::KeysExchanged => write!(f, "KeysExchanged"),
             SshState::AuthRequested => write!(f, "AuthRequested"),
+            SshState::AuthAccepted => write!(f, "AuthAccepted"),
             SshState::AuthMethodNegotiated => write!(f, "AuthMethodNegotiated"),
             SshState::AuthInProgress => write!(f, "AuthInProgress"),
             SshState::AuthSuccess => write!(f, "AuthSuccess"),
+            SshState::ReceivedUsernamePassword => write!(f, "AuthSuccess"),
             SshState::ChannelOpening => write!(f, "ChannelOpening"),
             SshState::ChannelOpen => write!(f, "ChannelOpen"),
             SshState::SessionStarted => write!(f, "SessionStarted"),
@@ -100,9 +106,12 @@ pub enum SshEvent {
     // Authentication events
     RequestAuth,
     SendAuthMethod,
+    SendAuthAccept,
     ReceiveAuthRequest,
     SendAuthSuccess,
     SendAuthFailure,
+
+    ReceiveUsernamePassword, //server only
 
     // Channel events
     OpenChannel,
@@ -129,9 +138,11 @@ impl fmt::Display for SshEvent {
             SshEvent::ReceiveNewKeys => write!(f, "ReceiveNewKeys"),
             SshEvent::RequestAuth => write!(f, "RequestAuth"),
             SshEvent::SendAuthMethod => write!(f, "SendAuthMethod"),
+            SshEvent::SendAuthAccept => write!(f, "SendAuthAccept"),
             SshEvent::ReceiveAuthRequest => write!(f, "ReceiveAuthRequest"),
             SshEvent::SendAuthSuccess => write!(f, "SendAuthSuccess"),
             SshEvent::SendAuthFailure => write!(f, "SendAuthFailure"),
+            SshEvent::ReceiveUsernamePassword => write!(f, "ReceiveUsernamePassword"),
             SshEvent::OpenChannel => write!(f, "OpenChannel"),
             SshEvent::ReceiveChannelOpen => write!(f, "ReceiveChannelOpen"),
             SshEvent::SendChannelOpenConfirmation => write!(f, "SendChannelOpenConfirmation"),
@@ -243,10 +254,25 @@ impl SshStateMachine {
                 self.state = SshState::AuthRequested;
             }
 
+            (SshState::AuthRequested, SshEvent::SendAuthMethod) if self.is_client => {
+                self.receive_service_accept().await?;
+                self.state = SshState::AuthMethodNegotiated;
+            }
+
             //server only
             (SshState::NewKeysReceived, SshEvent::ReceiveAuthRequest) if !self.is_client => {
                 self.receive_service_request().await?;
-                self.state = SshState::AuthInProgress;
+                self.state = SshState::AuthRequested;
+            }
+
+            (SshState::AuthRequested, SshEvent::SendAuthAccept) if !self.is_client => {
+                self.send_service_accept().await?;
+                self.state = SshState::AuthAccepted;
+            }
+
+            (SshState::AuthAccepted, SshEvent::ReceiveUsernamePassword) if !self.is_client => {
+                self.receive_username_password().await?;
+                self.state = SshState::ReceivedUsernamePassword;
             }
 
             // Error and disconnect transitions
@@ -692,29 +718,13 @@ impl SshStateMachine {
                     .ok_or_else(|| SshError::Protocol("Missing session ID".into()))?
                     .clone();
 
-                let iv_c2s;
-                let iv_s2c;
-                let key_c2s;
-                let key_s2c;
-                let mac_c2s;
-                let mac_s2c;
-
-                if self.is_client {
-                    iv_c2s = generate_new_key(&k, &exchange_hash, &session_id, b'A');
-                    iv_s2c = generate_new_key(&k, &exchange_hash, &session_id, b'B');
-                    key_c2s = generate_new_key(&k, &exchange_hash, &session_id, b'C');
-                    key_s2c = generate_new_key(&k, &exchange_hash, &session_id, b'D');
-                    mac_c2s = generate_new_key(&k, &exchange_hash, &session_id, b'E');
-                    mac_s2c = generate_new_key(&k, &exchange_hash, &session_id, b'F');
-                } else {
-                    iv_c2s = generate_new_key(&k, &exchange_hash, &session_id, b'B');
-                    iv_s2c = generate_new_key(&k, &exchange_hash, &session_id, b'A');
-                    key_c2s = generate_new_key(&k, &exchange_hash, &session_id, b'D');
-                    key_s2c = generate_new_key(&k, &exchange_hash, &session_id, b'C');
-                    mac_c2s = generate_new_key(&k, &exchange_hash, &session_id, b'F');
-                    mac_s2c = generate_new_key(&k, &exchange_hash, &session_id, b'E');
-                }
-
+                let iv_c2s = generate_new_key(&k, &exchange_hash, &session_id, b'A');
+                let iv_s2c = generate_new_key(&k, &exchange_hash, &session_id, b'B');
+                let key_c2s = generate_new_key(&k, &exchange_hash, &session_id, b'C');
+                let key_s2c = generate_new_key(&k, &exchange_hash, &session_id, b'D');
+                let mac_c2s = generate_new_key(&k, &exchange_hash, &session_id, b'E');
+                let mac_s2c = generate_new_key(&k, &exchange_hash, &session_id, b'F');
+                
                 let new_keys = NewKeys {
                     iv_c2s: Some(iv_c2s),
                     iv_s2c: Some(iv_s2c),
@@ -766,7 +776,8 @@ impl SshStateMachine {
         match message {
             Message::ServiceRequest { service_name } => {
                 if service_name == "ssh-userauth" || service_name == "ssh-connection" {
-                    println!("Received SERVICE_REQUEST for service: {}", service_name);
+                    info!("Received SERVICE_REQUEST for service: {}", service_name);
+                    self.transport.session.service_requested = Some(service_name);
                 } else {
                     return Err(SshError::Protocol(format!("Server does not support service: {}", service_name)))
                 }
@@ -779,12 +790,15 @@ impl SshStateMachine {
         Ok(())
     }
 
-    async fn send_service_accept(&mut self, service_name: String) -> SshResult<()> {
+    async fn send_service_accept(&mut self) -> SshResult<()> {
         if self.is_client {
             return Err(SshError::Protocol(
                 "Only the server can accept service requests".into(),
             ));
         }
+
+        let service_name = self.transport.session.service_requested.clone()
+            .ok_or_else(|| SshError::Protocol("Service requested field is empty while trying to accept".into()))?;
 
         info!("Sending SERVICE_ACCEPT for service: {}", service_name);
 
@@ -810,10 +824,71 @@ impl SshStateMachine {
 
         match message {
             Message::ServiceAccept { service_name } => {
-                println!("Received SERVICE_ACCEPT for service: {}", service_name);
+                info!("Received SERVICE_ACCEPT for service: {}", service_name);
+
+                if service_name == "ssh-userauth" {
+                    print!("Username: ");
+                    io::stdout().flush().unwrap();
+
+                    let mut username = String::new();
+                    io::stdin().read_line(&mut username).expect("Failed to read line");
+                    username.trim().to_string();
+
+                    print!("Password: ");
+                    io::stdout().flush().unwrap();
+
+                    let mut password = String::new();
+                    io::stdin().read_line(&mut password).expect("Failed to read line");
+                    password.trim().to_string();
+
+                    self.send_username_password(username, password).await?;
+                }
             },
             _ => {
                 return Err(SshError::Protocol("Expected SERVICE_ACCEPT message".into()))
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn send_username_password(&mut self, username: String, password: String) -> SshResult<()> {
+        if !self.is_client {
+            return Err(SshError::Protocol(
+                "Only the client can send its username and password".into(),
+            ));
+        }
+
+        info!("Sending USERNAME_PASSWORD");
+
+        let username_pwd_msg = Message::UsernamePassword { username: username, password: password};
+        let packet = self.encrypt_packet(&username_pwd_msg)?;
+
+        self.transport.send_encrypted_message(username_pwd_msg, packet).await?;
+
+        Ok(())
+    }
+
+    async fn receive_username_password(&mut self) -> SshResult<()> {
+        if self.is_client {
+            return Err(SshError::Protocol(
+                "Only the server can receive username and password".into(),
+            ));
+        }
+
+        let encrypted_packet = self.transport.receive_packet().await?;
+        let decrypted_packet = self.decrypt_packet(encrypted_packet)?;
+
+        let message = Message::from_packet(&decrypted_packet)?;
+
+        match message {
+            Message::UsernamePassword { username, password } => {
+                //verify valid username password, if so start the connection
+                println!("Server received username {}", username);
+                println!("Server received password {}", password);
+            },
+            _ => {
+                return Err(SshError::Protocol("Expected SERVICE_REQUEST message".into()))
             }
         }
 
@@ -843,28 +918,38 @@ impl SshStateMachine {
         Ok(())
     }
 
-    // async fn custom_disconnect(&mut self, reason_code: u32, description: String, language_tag: String) -> SshResult<()> {
-    //     info!("Disconnecting");
+    async fn custom_disconnect(&mut self, reason_code: u32, description: String, language_tag: String) -> SshResult<()> {
+        info!("Disconnecting");
 
-    //     let disconnect_message = Message::Disconnect { 
-    //         reason_code: (reason_code), 
-    //         description: (description), 
-    //         language_tag: (language_tag) 
-    //     };
+        let disconnect_message = Message::Disconnect { 
+            reason_code: (reason_code), 
+            description: (description), 
+            language_tag: (language_tag) 
+        };
 
-    //     self.transport.send_message(disconnect_message).await?;
+        self.transport.send_message(disconnect_message).await?;
 
-    //     Ok(())
-    // }
+        Ok(())
+    }
 
     fn encrypt_packet(&mut self, message: &Message) -> SshResult<SshPacket> {
         let mut packet = message.to_packet()?;
 
         let payload = packet.payload;
         
-        let key = self.transport.session.new_keys.key_c2s.as_ref().ok_or(SshError::Protocol("Missing encryption key".into()))?;
-        let iv = self.transport.session.new_keys.iv_c2s.as_ref().ok_or(SshError::Protocol("Missing IV".into()))?;
-        let mac_key = self.transport.session.new_keys.mac_c2s.as_ref().ok_or(SshError::Protocol("Missing MAC key".into()))?;
+        let key;
+        let iv;
+        let mac_key;
+
+        if self.is_client {
+            key = self.transport.session.new_keys.key_c2s.as_ref().ok_or(SshError::Protocol("Missing encryption key".into()))?;
+            iv = self.transport.session.new_keys.iv_c2s.as_ref().ok_or(SshError::Protocol("Missing IV".into()))?;
+            mac_key = self.transport.session.new_keys.mac_c2s.as_ref().ok_or(SshError::Protocol("Missing MAC key".into()))?;
+        } else {
+            key = self.transport.session.new_keys.key_s2c.as_ref().ok_or(SshError::Protocol("Missing encryption key".into()))?;
+            iv = self.transport.session.new_keys.iv_s2c.as_ref().ok_or(SshError::Protocol("Missing IV".into()))?;
+            mac_key = self.transport.session.new_keys.mac_s2c.as_ref().ok_or(SshError::Protocol("Missing MAC key".into()))?;
+        }
 
         let block_size = 16;
         let padding_len = block_size - ((1 + payload.len()) % block_size);
@@ -903,9 +988,19 @@ impl SshStateMachine {
     fn decrypt_packet(&mut self, mut packet: SshPacket) -> SshResult<SshPacket> {
         let encrypted_payload = packet.payload;
 
-        let key = self.transport.session.new_keys.key_s2c.as_ref().ok_or(SshError::Protocol("Missing decryption key".into()))?;
-        let iv = self.transport.session.new_keys.iv_s2c.as_ref().ok_or(SshError::Protocol("Missing IV".into()))?;
-        let mac_key = self.transport.session.new_keys.mac_s2c.as_ref().ok_or(SshError::Protocol("Missing MAC key".into()))?;
+        let key;
+        let iv;
+        let mac_key;
+
+        if self.is_client {
+            key = self.transport.session.new_keys.key_s2c.as_ref().ok_or(SshError::Protocol("Missing encryption key".into()))?;
+            iv = self.transport.session.new_keys.iv_s2c.as_ref().ok_or(SshError::Protocol("Missing IV".into()))?;
+            mac_key = self.transport.session.new_keys.mac_s2c.as_ref().ok_or(SshError::Protocol("Missing MAC key".into()))?;
+        } else {
+            key = self.transport.session.new_keys.key_c2s.as_ref().ok_or(SshError::Protocol("Missing encryption key".into()))?;
+            iv = self.transport.session.new_keys.iv_c2s.as_ref().ok_or(SshError::Protocol("Missing IV".into()))?;
+            mac_key = self.transport.session.new_keys.mac_c2s.as_ref().ok_or(SshError::Protocol("Missing MAC key".into()))?;
+        }
         
         let mut cursor = std::io::Cursor::new(&encrypted_payload);
 

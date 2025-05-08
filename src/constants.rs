@@ -20,6 +20,7 @@ pub mod msg {
     pub const SSH_MSG_NEWKEYS: u8 = 21;
     pub const KEXDH_INIT: u8 = 30;
     pub const KEXDH_REPLY: u8 = 31;
+    pub const USERNAME_PASSWORD: u8 = 50; //random val as a placeholder
 }
 
 pub mod host_keys {

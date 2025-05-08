@@ -36,7 +36,8 @@ pub struct Session {
     pub secret: Option<EphemeralSecret>, //need to store secret for computing shared secret
     pub session_id: Option<Vec<u8>>, //first hash generated
     pub exchange_hash: Option<Vec<u8>>, //most recent hash if new dh keys are generated
-    pub new_keys: NewKeys
+    pub new_keys: NewKeys,
+    pub service_requested: Option<String>
 }
 
 pub struct NewKeys {
@@ -71,7 +72,8 @@ impl Transport {
             secret: None,
             session_id: None,
             exchange_hash: None,
-            new_keys: new_keys
+            new_keys: new_keys,
+            service_requested: None
         };
 
         Ok(Transport {

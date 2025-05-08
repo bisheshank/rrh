@@ -44,6 +44,7 @@ impl SshClient {
         state_machine.process_event(SshEvent::ReceiveNewKeys).await?;
 
         state_machine.process_event(SshEvent::RequestAuth).await?;
+        state_machine.process_event(SshEvent::SendAuthMethod).await?;
 
         println!("Successfully connected to {}", address);
 
