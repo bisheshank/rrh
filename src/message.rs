@@ -44,6 +44,9 @@ pub enum Message {
     NewKeys,
     ServiceRequest {
         service_name: String,
+    }, 
+    ServiceAccept {
+        service_name: String
     }
 }
 
@@ -56,7 +59,8 @@ impl fmt::Display for Message {
             Message::KexDhInit { .. } => write!(f, "KEXDH_INIT"),
             Message::KexDhReply { .. } => write!(f, "KEXDH_REPLY"),
             Message::NewKeys { .. } => write!(f, "SSH_MSG_NEWKEYS"),
-            Message::ServiceRequest { .. } => write!(f, "SERVICE_REQUEST")
+            Message::ServiceRequest { .. } => write!(f, "SERVICE_REQUEST"),
+            Message::ServiceAccept { .. } => write!(f, "SERVICE_ACCEPT")
         }
     }
 }
@@ -143,6 +147,14 @@ impl Message {
                 buffer.put_slice(service_name.as_bytes());
                 
                 Ok(SshPacket::new(msg::SERVICE_REQUEST, buffer.freeze()))
+            },
+            Message::ServiceAccept { service_name} => {
+                let mut buffer = BytesMut::new();
+
+                buffer.put_u32(service_name.len() as u32);
+                buffer.put_slice(service_name.as_bytes());
+                
+                Ok(SshPacket::new(msg::SERVICE_ACCEPT, buffer.freeze()))
             },
             _ => Ok(SshPacket::new(1, Bytes::default())),
         }
@@ -315,6 +327,29 @@ impl Message {
                 };
             
                 Ok(Message::ServiceRequest { service_name })
+            },
+            msg::SERVICE_ACCEPT => {
+                if data.len() < 4 {
+                    return Err(SshError::Protocol("SERVICE_ACCEPT message too short".to_string()));
+                }
+            
+                let mut reader = Bytes::copy_from_slice(&data);
+            
+                let service_len = reader.get_u32() as usize;
+            
+                if reader.remaining() < service_len {
+                    return Err(SshError::Protocol("SERVICE_ACCEPT service name truncated".to_string()));
+                }
+            
+                let service_name_bytes = reader.split_to(service_len);
+                let service_name = match std::str::from_utf8(&service_name_bytes) {
+                    Ok(s) => s.to_string(),
+                    Err(_) => {
+                        return Err(SshError::Protocol("SERVICE_ACCEPT service name is not valid UTF-8".to_string()));
+                    }
+                };
+            
+                Ok(Message::ServiceAccept { service_name })
             },
             _ => Ok(Message::Unimplemented { sequence_number: 0 }),
         }

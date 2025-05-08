@@ -239,7 +239,7 @@ impl SshStateMachine {
 
             //client only
             (SshState::NewKeysReceived, SshEvent::RequestAuth) if self.is_client => {
-                self.send_service_request("auth".into()).await?;
+                self.send_service_request("ssh-userauth".into()).await?;
                 self.state = SshState::AuthRequested;
             }
 
@@ -808,7 +808,7 @@ impl SshStateMachine {
 
         let encrypted_part_len = packet_len; 
         let total_len = 4 + encrypted_part_len;
-        let mac_len = 20; // for SHA1
+        let mac_len = 20; 
 
         if encrypted_payload.len() < total_len + mac_len {
             return Err(SshError::Protocol("Packet too short".into()));
@@ -839,6 +839,7 @@ impl SshStateMachine {
         if decrypted.len() < 1 + padding_len {
             return Err(SshError::Protocol("Decrypted data too short".into()));
         }
+
         let payload = &decrypted[1..(decrypted.len() - padding_len)];
         let payload_bytes = Bytes::copy_from_slice(payload);
 
@@ -848,13 +849,35 @@ impl SshStateMachine {
 
         match message {
             Message::ServiceRequest { service_name } => {
-                println!("Received SERVICE_REQUEST for service: {}", service_name);
+                if service_name == "ssh-userauth" || service_name == "ssh-connection" {
+                    println!("Received SERVICE_REQUEST for service: {}", service_name);
+                } else {
+                    return Err(SshError::Protocol(format!("Server does not support service: {}", service_name)))
+                }
             },
             _ => {
                 return Err(SshError::Protocol("Expected SERVICE_REQUEST message".into()))
             }
         }
 
+        Ok(())
+    }
+
+    async fn send_service_accept(&mut self) -> SshResult<()> {
+        if self.is_client {
+            return Err(SshError::Protocol(
+                "Only the server can accept service requests".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn receive_service_accept(&mut self) -> SshResult<()> {
+        if !self.is_client {
+            return Err(SshError::Protocol(
+                "Only the client can receive service accepts".into(),
+            ));
+        }
         Ok(())
     }
 
