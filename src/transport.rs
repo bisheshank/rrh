@@ -34,8 +34,18 @@ pub struct Session {
     pub shared_key: Option<[u8; 32]>, 
     pub client_public: Option<[u8; 32]>,
     pub secret: Option<EphemeralSecret>, //need to store secret for computing shared secret
-    pub session_id: Option<Vec<u8>>,
-    pub exchange_hash: Option<Vec<u8>>
+    pub session_id: Option<Vec<u8>>, //first hash generated
+    pub exchange_hash: Option<Vec<u8>>, //most recent hash if new dh keys are generated
+    pub new_keys: NewKeys
+}
+
+pub struct NewKeys {
+    pub iv_c2s: Option<Vec<u8>>,
+    pub iv_s2c: Option<Vec<u8>>,
+    pub key_c2s: Option<Vec<u8>>,
+    pub key_s2c: Option<Vec<u8>>,
+    pub mac_c2s: Option<Vec<u8>>,
+    pub mac_s2c: Option<Vec<u8>>,
 }
 
 impl Transport {
@@ -46,12 +56,22 @@ impl Transport {
         // Create a BufReader for the reader half
         let reader = BufReader::new(reader);
 
+        let new_keys = NewKeys {
+            iv_c2s: None,
+            iv_s2c: None,
+            key_c2s: None,
+            key_s2c: None,
+            mac_c2s: None,
+            mac_s2c: None,
+        };
+
         let session = Session {
             shared_key: None,
             client_public: None,
             secret: None,
             session_id: None,
             exchange_hash: None,
+            new_keys: new_keys
         };
 
         Ok(Transport {

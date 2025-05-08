@@ -11,6 +11,8 @@ use crate::{
     message::Message,
 };
 
+use sha1::{Sha1, Digest};
+
 #[derive(Debug, Clone)]
 pub struct Algorithms {
     pub kex: Vec<String>,
@@ -184,4 +186,17 @@ pub fn generate_public_private() -> (EphemeralSecret, PublicKey) {
 
 pub fn generate_shared(secret: EphemeralSecret, other_pub: PublicKey) -> SharedSecret {
     secret.diffie_hellman(&other_pub)
+}
+
+pub fn generate_new_key(k: &[u8; 32], exchange_hash: &Vec<u8>, session_id: &Vec<u8>, id_byte: u8) -> Vec<u8>{
+    let mut hasher = Sha1::new();
+
+    hasher.update(&k);
+    hasher.update(&exchange_hash);
+    hasher.update(&[id_byte]);
+    hasher.update(&session_id);
+
+    let new_key = hasher.finalize().to_vec();
+
+    return new_key;
 }

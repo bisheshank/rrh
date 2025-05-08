@@ -6,12 +6,12 @@ use core::fmt;
 use tokio::net::TcpStream;
 
 use crate::{
-    config::SshConfig, constants::{host_keys::{PRIVATE_SERVER_HOST_KEY, PUBLIC_SERVER_HOST_KEY}, reason_codes::{self, SSH_DISCONNECT_BY_APPLICATION, SSH_DISCONNECT_HOST_KEY_NOT_VERIFIABLE}}, error::{SshError, SshResult}, kex::create_kexinit_message, message::Message, ssh_codec::SshPacket, transport::Transport
+    config::SshConfig, constants::{host_keys::{PRIVATE_SERVER_HOST_KEY, PUBLIC_SERVER_HOST_KEY}, reason_codes::{self, SSH_DISCONNECT_BY_APPLICATION, SSH_DISCONNECT_HOST_KEY_NOT_VERIFIABLE}}, error::{SshError, SshResult}, kex::create_kexinit_message, message::Message, ssh_codec::SshPacket, transport::Transport, transport::NewKeys
 };
 
 use x25519_dalek::PublicKey;
 use ed25519_dalek::{SigningKey, Signature, Verifier, Signer, VerifyingKey};
-use crate::kex::{generate_public_private, generate_shared};
+use crate::kex::{generate_public_private, generate_shared, generate_new_key};
 
 #[derive(PartialEq, Clone, Copy)]
 pub enum SshState {
@@ -636,6 +636,8 @@ impl SshStateMachine {
             self.transport.session.session_id = Some(signature_hash);
         }
 
+        self.transport.session.shared_key = Some(*k);
+
         self.transport.send_message(dh_reply_message).await?;
 
         Ok(())
@@ -657,6 +659,40 @@ impl SshStateMachine {
         match newkeys_msg {
             Message::NewKeys => {
                 //if this is received, should activate all the new keys: iv, enc, mac
+                let k = self.transport.session.shared_key
+                    .as_ref()
+                    .ok_or_else(|| SshError::Protocol("Missing shared key".into()))?
+                    .clone();
+
+                let exchange_hash = self.transport.session.exchange_hash
+                    .as_ref()
+                    .ok_or_else(|| SshError::Protocol("Missing exchange hash".into()))?
+                    .clone();
+
+                let session_id = self.transport.session.session_id
+                    .as_ref()
+                    .ok_or_else(|| SshError::Protocol("Missing session ID".into()))?
+                    .clone();
+
+                let iv_c2s = generate_new_key(&k, &exchange_hash, &session_id, b'A');
+                let iv_s2c = generate_new_key(&k, &exchange_hash, &session_id, b'B');
+                let key_c2s = generate_new_key(&k, &exchange_hash, &session_id, b'C');
+                let key_s2c = generate_new_key(&k, &exchange_hash, &session_id, b'D');
+                let mac_c2s = generate_new_key(&k, &exchange_hash, &session_id, b'E');
+                let mac_s2c = generate_new_key(&k, &exchange_hash, &session_id, b'F');
+
+                let new_keys = NewKeys {
+                    iv_c2s: Some(iv_c2s),
+                    iv_s2c: Some(iv_s2c),
+                    key_c2s: Some(key_c2s),
+                    key_s2c: Some(key_s2c),
+                    mac_c2s: Some(mac_c2s),
+                    mac_s2c: Some(mac_s2c),
+                };
+
+                //now server and client has all the new keys that just got computed
+                //should be the same for both server and client
+                self.transport.session.new_keys = new_keys;
             },
             _ => return Err(SshError::Protocol("Expected SSH_MSG_NEWKEYS message".into())),
         }
