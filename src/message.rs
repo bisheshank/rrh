@@ -51,6 +51,17 @@ pub enum Message {
     UsernamePassword {
         username: String,
         password: String,
+    },
+    AuthVerified,
+    OpenChannel {
+        channel_type: String,
+    },
+    ChannelOpenConfirmation,
+    ExecuteCommand {
+        command: String,
+    },
+    CommandResult {
+        result: String
     }
 }
 
@@ -65,7 +76,12 @@ impl fmt::Display for Message {
             Message::NewKeys { .. } => write!(f, "SSH_MSG_NEWKEYS"),
             Message::ServiceRequest { .. } => write!(f, "SERVICE_REQUEST"),
             Message::ServiceAccept { .. } => write!(f, "SERVICE_ACCEPT"),
-            Message::UsernamePassword { .. } => write!(f, "USERNAME_PASSWORD")
+            Message::UsernamePassword { .. } => write!(f, "USERNAME_PASSWORD"),
+            Message::AuthVerified { .. } => write!(f, "AUTH_VERIFIED"),
+            Message::OpenChannel { .. } => write!(f, "OPEN_CHANNEL"),
+            Message::ChannelOpenConfirmation { .. } => write!(f, "CHANNEL_OPEN_CONFIRMATION"),
+            Message::ExecuteCommand { .. } => write!(f, "EXECUTE_COMMAND"),
+            Message::CommandResult { .. } => write!(f, "COMMAND_RESULT"),
         }
     }
 }
@@ -171,6 +187,36 @@ impl Message {
                 buffer.put_slice(password.as_bytes());
                 
                 Ok(SshPacket::new(msg::USERNAME_PASSWORD, buffer.freeze()))
+            },
+            Message::AuthVerified=> {
+                Ok(SshPacket::new(msg::AUTH_VERIFIED, Bytes::new()))
+            },
+            Message::OpenChannel{ channel_type } => {
+                let mut buffer = BytesMut::new();
+
+                buffer.put_u32(channel_type.len() as u32);
+                buffer.put_slice(channel_type.as_bytes());
+                
+                Ok(SshPacket::new(msg::SSH_MSG_CHANNEL_OPEN, buffer.freeze()))
+            },
+            Message::ChannelOpenConfirmation => {
+                Ok(SshPacket::new(msg::SSH_MSG_CHANNEL_OPEN_CONFIRMATION, Bytes::new()))
+            },
+            Message::ExecuteCommand{ command } => {
+                let mut buffer = BytesMut::new();
+
+                buffer.put_u32(command.len() as u32);
+                buffer.put_slice(command.as_bytes());
+                
+                Ok(SshPacket::new(msg::EXECUTE_COMMAND, buffer.freeze()))
+            },
+            Message::CommandResult{ result } => {
+                let mut buffer = BytesMut::new();
+
+                buffer.put_u32(result.len() as u32);
+                buffer.put_slice(result.as_bytes());
+                
+                Ok(SshPacket::new(msg::COMMAND_RESULT, buffer.freeze()))
             },
             _ => Ok(SshPacket::new(1, Bytes::default())),
         }
@@ -401,6 +447,81 @@ impl Message {
                 };
             
                 Ok(Message::UsernamePassword { username, password })
+            },
+            msg::AUTH_VERIFIED => {
+                Ok(Message::AuthVerified)
+            },
+            msg::SSH_MSG_CHANNEL_OPEN => {
+                if data.len() < 4 {
+                    return Err(SshError::Protocol("SSH_MSG_CHANNEL_OPEN message too short".to_string()));
+                }
+            
+                let mut reader = Bytes::copy_from_slice(&data);
+            
+                let session_len = reader.get_u32() as usize;
+            
+                if reader.remaining() < session_len {
+                    return Err(SshError::Protocol("SSH_MSG_CHANNEL_OPEN session type truncated".to_string()));
+                }
+            
+                let session_type = reader.split_to(session_len);
+                let session_name = match std::str::from_utf8(&session_type) {
+                    Ok(s) => s.to_string(),
+                    Err(_) => {
+                        return Err(SshError::Protocol("SSH_MSG_CHANNEL_OPEN session type is not valid UTF-8".to_string()));
+                    }
+                };
+            
+                Ok(Message::OpenChannel { channel_type: session_name })
+            },
+            msg::SSH_MSG_CHANNEL_OPEN_CONFIRMATION => {
+                Ok(Message::ChannelOpenConfirmation)
+            },
+            msg::EXECUTE_COMMAND => {
+                if data.len() < 4 {
+                    return Err(SshError::Protocol("EXECUTE_COMMAND message too short".to_string()));
+                }
+            
+                let mut reader = Bytes::copy_from_slice(&data);
+            
+                let command_len = reader.get_u32() as usize;
+            
+                if reader.remaining() < command_len {
+                    return Err(SshError::Protocol("EXECUTE_COMMAND command is truncated".to_string()));
+                }
+            
+                let command_bytes = reader.split_to(command_len);
+                let command = match std::str::from_utf8(&command_bytes) {
+                    Ok(s) => s.to_string(),
+                    Err(_) => {
+                        return Err(SshError::Protocol("EXECUTE_COMMAND command is not valid UTF-8".to_string()));
+                    }
+                };
+            
+                Ok(Message::ExecuteCommand { command: command })
+            },
+            msg::COMMAND_RESULT => {
+                if data.len() < 4 {
+                    return Err(SshError::Protocol("COMMAND_RESULT message too short".to_string()));
+                }
+            
+                let mut reader = Bytes::copy_from_slice(&data);
+            
+                let result_len = reader.get_u32() as usize;
+            
+                if reader.remaining() < result_len {
+                    return Err(SshError::Protocol("COMMAND_RESULT result truncated".to_string()));
+                }
+            
+                let result_bytes = reader.split_to(result_len);
+                let result = match std::str::from_utf8(&result_bytes) {
+                    Ok(s) => s.to_string(),
+                    Err(_) => {
+                        return Err(SshError::Protocol("COMMAND_RESULT result is not valid UTF-8".to_string()));
+                    }
+                };
+            
+                Ok(Message::CommandResult { result: result })
             },
             _ => Ok(Message::Unimplemented { sequence_number: 0 }),
         }

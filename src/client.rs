@@ -47,7 +47,16 @@ impl SshClient {
         state_machine.process_event(SshEvent::SendAuthMethod).await?;
 
         println!("Successfully connected to {}", address);
+        //maybe can send an open channel message here which just essentially begins a repl
+        //client sends encrypted messages with the command they want to execute to server
+        //server decrypts the message, parses command string, executes it, sends encrypted message with
+        //result back to client
+        //display result in repl
+        state_machine.process_event(SshEvent::OpenChannel).await?;
+        state_machine.process_event(SshEvent::StartSession).await?;
 
         Ok(Self { state_machine })
     }
 }
+
+//need to clean up states and then just start the terminal and then done

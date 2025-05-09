@@ -73,6 +73,20 @@ async fn handle_connection(stream: TcpStream, config: SshConfig) -> SshResult<()
     state_machine.process_event(SshEvent::SendAuthAccept).await?;
 
     state_machine.process_event(SshEvent::ReceiveUsernamePassword).await?;
+    state_machine.process_event(SshEvent::ReceiveChannelOpen).await?;
+    state_machine.process_event(SshEvent::SendChannelOpenConfirmation).await?;
+
+    loop {
+        match state_machine.process_event(SshEvent::ReceiveCommand).await {
+            Ok(_) => {
+                //nothing to do here; command processed smoothly
+            }
+            Err(e) => {
+                eprintln!("[{}] Error processing command: {}", peer_addr, e);
+                break;
+            }
+        }
+    }
 
     Ok(())
 }

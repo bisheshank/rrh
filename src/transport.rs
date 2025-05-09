@@ -37,7 +37,8 @@ pub struct Session {
     pub session_id: Option<Vec<u8>>, //first hash generated
     pub exchange_hash: Option<Vec<u8>>, //most recent hash if new dh keys are generated
     pub new_keys: NewKeys,
-    pub service_requested: Option<String>
+    pub service_requested: Option<String>,
+    pub username: Option<String>
 }
 
 pub struct NewKeys {
@@ -73,7 +74,8 @@ impl Transport {
             session_id: None,
             exchange_hash: None,
             new_keys: new_keys,
-            service_requested: None
+            service_requested: None,
+            username: None
         };
 
         Ok(Transport {
@@ -128,8 +130,10 @@ impl Transport {
         Ok(())
     }
 
-    pub async fn send_encrypted_message(&mut self, message: Message, mut packet: SshPacket) -> SshResult<()> {
-        debug!("Sending encrypted message: {}", message);
+    pub async fn send_encrypted_message(&mut self, message: Message, mut packet: SshPacket, print: bool) -> SshResult<()> {
+        if print {
+            debug!("Sending encrypted message: {}", message);
+        }
 
         packet.sequence_number = self.send_sequence_number;
         let data = packet.encode()?;

@@ -21,6 +21,11 @@ pub mod msg {
     pub const KEXDH_INIT: u8 = 30;
     pub const KEXDH_REPLY: u8 = 31;
     pub const USERNAME_PASSWORD: u8 = 50; //random val as a placeholder
+    pub const AUTH_VERIFIED: u8 = 49; //random val as a placeholder
+    pub const SSH_MSG_CHANNEL_OPEN: u8 = 90;
+    pub const SSH_MSG_CHANNEL_OPEN_CONFIRMATION: u8 = 91;
+    pub const EXECUTE_COMMAND: u8 = 97; //random val as a placeholder
+    pub const COMMAND_RESULT: u8 = 98; //random val as a placeholder
 }
 
 pub mod host_keys {

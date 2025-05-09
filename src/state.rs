@@ -4,7 +4,7 @@ use sha1::{Sha1, Digest};
 
 use core::fmt;
 use tokio::net::TcpStream;
-use std::io::{self, Write};
+use std::{io::{self, Write}, process::Command, result, sync::mpsc::channel};
 
 use crate::{
     config::SshConfig, constants::{host_keys::{PRIVATE_SERVER_HOST_KEY, PUBLIC_SERVER_HOST_KEY}, reason_codes::{self, SSH_DISCONNECT_BY_APPLICATION, SSH_DISCONNECT_HOST_KEY_NOT_VERIFIABLE}}, error::{SshError, SshResult}, kex::create_kexinit_message, message::Message, ssh_codec::SshPacket, transport::Transport, transport::NewKeys
@@ -77,7 +77,7 @@ impl fmt::Display for SshState {
             SshState::AuthMethodNegotiated => write!(f, "AuthMethodNegotiated"),
             SshState::AuthInProgress => write!(f, "AuthInProgress"),
             SshState::AuthSuccess => write!(f, "AuthSuccess"),
-            SshState::ReceivedUsernamePassword => write!(f, "AuthSuccess"),
+            SshState::ReceivedUsernamePassword => write!(f, "ReceivedUsernamePassword"),
             SshState::ChannelOpening => write!(f, "ChannelOpening"),
             SshState::ChannelOpen => write!(f, "ChannelOpen"),
             SshState::SessionStarted => write!(f, "SessionStarted"),
@@ -117,6 +117,9 @@ pub enum SshEvent {
     OpenChannel,
     ReceiveChannelOpen,
     SendChannelOpenConfirmation,
+    StartSession,
+
+    ReceiveCommand,
 
     // Error events
     Error(String),
@@ -146,6 +149,8 @@ impl fmt::Display for SshEvent {
             SshEvent::OpenChannel => write!(f, "OpenChannel"),
             SshEvent::ReceiveChannelOpen => write!(f, "ReceiveChannelOpen"),
             SshEvent::SendChannelOpenConfirmation => write!(f, "SendChannelOpenConfirmation"),
+            SshEvent::StartSession => write!(f, "StartSession"),
+            SshEvent::ReceiveCommand => write!(f, "ReceiveCommand"),
             SshEvent::Error(msg) => write!(f, "Error({})", msg),
             SshEvent::Disconnect => write!(f, "Disconnect"),
         }
@@ -259,6 +264,16 @@ impl SshStateMachine {
                 self.state = SshState::AuthMethodNegotiated;
             }
 
+            (SshState::AuthMethodNegotiated, SshEvent::OpenChannel) if self.is_client => {
+                self.receive_auth_verified().await?;
+                self.state = SshState::ChannelOpen;
+            }
+
+            (SshState::ChannelOpen, SshEvent::StartSession) if self.is_client => {
+                self.receive_channel_open_confirmation().await?;
+                self.state = SshState::SessionStarted;
+            }
+
             //server only
             (SshState::NewKeysReceived, SshEvent::ReceiveAuthRequest) if !self.is_client => {
                 self.receive_service_request().await?;
@@ -273,6 +288,21 @@ impl SshStateMachine {
             (SshState::AuthAccepted, SshEvent::ReceiveUsernamePassword) if !self.is_client => {
                 self.receive_username_password().await?;
                 self.state = SshState::ReceivedUsernamePassword;
+            }
+
+            (SshState::ReceivedUsernamePassword, SshEvent::ReceiveChannelOpen) if !self.is_client => {
+                self.receive_channel_open().await?;
+                self.state = SshState::ChannelOpen;
+            }
+
+            (SshState::ChannelOpen, SshEvent::SendChannelOpenConfirmation) if !self.is_client => {
+                self.send_channel_open_confirmation().await?;
+                self.state = SshState::SessionStarted;
+            }
+
+            (SshState::SessionStarted, SshEvent::ReceiveCommand) if !self.is_client => {
+                self.receive_command_execute().await?;
+                self.state = SshState::SessionStarted;
             }
 
             // Error and disconnect transitions
@@ -756,7 +786,7 @@ impl SshStateMachine {
         let service_request = Message::ServiceRequest { service_name: service_name };
         let packet = self.encrypt_packet(&service_request)?;
 
-        self.transport.send_encrypted_message(service_request, packet).await?;
+        self.transport.send_encrypted_message(service_request, packet, true).await?;
 
         Ok(())
     }
@@ -805,7 +835,7 @@ impl SshStateMachine {
         let service_accept = Message::ServiceAccept { service_name: service_name };
         let packet = self.encrypt_packet(&service_accept)?;
 
-        self.transport.send_encrypted_message(service_accept, packet).await?;
+        self.transport.send_encrypted_message(service_accept, packet, true).await?;
 
         Ok(())
     }
@@ -841,7 +871,11 @@ impl SshStateMachine {
                     io::stdin().read_line(&mut password).expect("Failed to read line");
                     password.trim().to_string();
 
+                    let cloned = username.clone();
+
                     self.send_username_password(username, password).await?;
+
+                    self.transport.session.username = Some(cloned);
                 }
             },
             _ => {
@@ -864,7 +898,7 @@ impl SshStateMachine {
         let username_pwd_msg = Message::UsernamePassword { username: username, password: password};
         let packet = self.encrypt_packet(&username_pwd_msg)?;
 
-        self.transport.send_encrypted_message(username_pwd_msg, packet).await?;
+        self.transport.send_encrypted_message(username_pwd_msg, packet, true).await?;
 
         Ok(())
     }
@@ -884,11 +918,291 @@ impl SshStateMachine {
         match message {
             Message::UsernamePassword { username, password } => {
                 //verify valid username password, if so start the connection
-                println!("Server received username {}", username);
-                println!("Server received password {}", password);
+                info!("Server received username {}", username.trim());
+                info!("Server received password {}", password.trim());
+
+                if username.trim() == "ashton" && password.trim() == "ashton" {
+                    //maybe send a username / password accepted message 
+                    //when client receives this, start the terminal
+                    self.send_auth_verified().await?;
+                } else {
+                    return Err(SshError::Protocol("Username and/or password invalid".into()));
+                }
             },
             _ => {
-                return Err(SshError::Protocol("Expected SERVICE_REQUEST message".into()))
+                return Err(SshError::Protocol("Expected SERVICE_REQUEST message".into()));
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn send_auth_verified(&mut self) -> SshResult<()> {
+        if self.is_client {
+            return Err(SshError::Protocol(
+                "Only the server can verify authentication".into(),
+            ));
+        }
+
+        info!("Sending AUTH_VERIFIED");
+
+        let auth_verified_msg = Message::AuthVerified;
+        let packet = self.encrypt_packet(&auth_verified_msg)?;
+
+        self.transport.send_encrypted_message(auth_verified_msg, packet, true).await?;
+
+        Ok(())
+    }
+
+    async fn receive_auth_verified(&mut self) -> SshResult<()> {
+        if !self.is_client {
+            return Err(SshError::Protocol(
+                "Only the client can receive auth verification".into(),
+            ));
+        }
+        
+        info!("Receiving AUTH_VERIFIED");
+
+        let encrypted_packet = self.transport.receive_packet().await?;
+        let decrypted_packet = self.decrypt_packet(encrypted_packet)?;
+
+        let message = Message::from_packet(&decrypted_packet)?;
+
+        match message {
+            Message::AuthVerified => {
+                self.send_open_channel().await?;
+            },
+            _ => {
+                return Err(SshError::Protocol("Expected AUTH_VERIFICATION message".into()));
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn send_open_channel(&mut self) -> SshResult<()> {
+        if !self.is_client {
+            return Err(SshError::Protocol(
+                "Only the client can request to open the channel".into(),
+            ));
+        }
+
+        info!("Sending SSH_MSG_OPEN_CHANNEL");
+
+        let open_channel_msg = Message::OpenChannel { channel_type: "session".into() };
+        let packet = self.encrypt_packet(&open_channel_msg)?;
+
+        self.transport.send_encrypted_message(open_channel_msg, packet, true).await?;
+
+        Ok(())
+    }
+
+    async fn receive_channel_open(&mut self) -> SshResult<()> {
+        if self.is_client {
+            return Err(SshError::Protocol(
+                "Only the server can receive open channel requests".into(),
+            ));
+        }
+
+        info!("Receiving SSH_MSG_CHANNEL_OPEN");
+
+        let encrypted_packet = self.transport.receive_packet().await?;
+        let decrypted_packet = self.decrypt_packet(encrypted_packet)?;
+
+        let message = Message::from_packet(&decrypted_packet)?;
+
+        match message {
+            Message::OpenChannel { channel_type } => {
+                //this has been received, so open channel
+                if channel_type == "session" {
+                    info!("Session requested");
+                } else {
+                    return Err(SshError::Protocol(format!(
+                        "Channel type is not supported: {}",
+                        channel_type
+                    )));
+                }
+            },
+            _ => {
+                return Err(SshError::Protocol("Expected SSH_MSG_CHANNEL_OPEN message".into()));
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn send_command_execute(&mut self, command: String) -> SshResult<()> {
+        if !self.is_client {
+            return Err(SshError::Protocol(
+                "Only the client can send commands".into(),
+            ));
+        }
+
+        let command_msg = Message::ExecuteCommand { command: command };
+        let packet = self.encrypt_packet(&command_msg)?;
+
+        self.transport.send_encrypted_message(command_msg, packet, false).await?;
+
+        Ok(())
+    }
+
+    async fn receive_command_execute(&mut self) -> SshResult<()> {
+        if self.is_client {
+            return Err(SshError::Protocol(
+                "Only the server can receive commands to execute".into(),
+            ));
+        }
+
+        let encrypted_packet = self.transport.receive_packet().await?;
+        let decrypted_packet = self.decrypt_packet(encrypted_packet)?;
+
+        let message = Message::from_packet(&decrypted_packet)?;
+
+        match message {
+            Message::ExecuteCommand { command } => {
+                //execute the command
+                let output = Command::new("sh")
+                    .arg("-c")
+                    .arg(&command)
+                    .output();
+
+                match output {
+                    Ok(output) => {
+                        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+                        let result = format!(
+                            "{}{}",
+                            stdout,
+                            if !stderr.is_empty() {
+                                format!("\n[stderr]\n{}", stderr)
+                            } else {
+                                "".to_string()
+                            }
+                        );
+
+                        //send this result back to client
+                        self.send_command_result(result).await?;
+                    }
+                    Err(e) => {
+                        let error_message = format!("Failed to execute command: {}", e);
+                        self.send_command_result(error_message).await?;
+                    }
+                }
+            },
+            _ => {
+                return Err(SshError::Protocol("Expected SSH_MSG_CHANNEL_OPEN message".into()));
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn send_command_result(&mut self, result: String) -> SshResult<()> {
+        if self.is_client {
+            return Err(SshError::Protocol(
+                "Only the server can send command results".into(),
+            ));
+        }
+
+        let result_msg = Message::CommandResult { result: result };
+        let packet = self.encrypt_packet(&result_msg)?;
+
+        self.transport.send_encrypted_message(result_msg, packet, false).await?;
+
+        Ok(())
+    }
+
+    async fn receive_command_result(&mut self) -> SshResult<String> {
+        if !self.is_client {
+            return Err(SshError::Protocol(
+                "Only the client can receive command results".into(),
+            ));
+        }
+
+        let encrypted_packet = self.transport.receive_packet().await?;
+        let decrypted_packet = self.decrypt_packet(encrypted_packet)?;
+
+        let message = Message::from_packet(&decrypted_packet)?;
+        let cmd_result;
+
+        match message {
+            Message::CommandResult { result } => {
+                cmd_result = result;
+            },
+            _ => {
+                return Err(SshError::Protocol("Expected COMMAND_RESULT message".into()));
+            }
+        }
+
+        Ok(cmd_result)
+    }
+
+    async fn send_channel_open_confirmation(&mut self) -> SshResult<()> {
+        if self.is_client {
+            return Err(SshError::Protocol(
+                "Only the server can send channel open confirmation".into(),
+            ));
+        }
+
+        info!("Sending SSH_MSG_CHANNEL_OPEN_CONFIRMATION");
+
+        let channel_conf_msg = Message::ChannelOpenConfirmation;
+        let packet = self.encrypt_packet(&channel_conf_msg)?;
+
+        self.transport.send_encrypted_message(channel_conf_msg, packet, true).await?;
+
+        Ok(())
+    }
+
+    async fn receive_channel_open_confirmation(&mut self) -> SshResult<()> {
+        if !self.is_client {
+            return Err(SshError::Protocol(
+                "Only the client can receive channel open confirmation".into(),
+            ));
+        }
+        
+        info!("Receiving SSH_MSG_CHANNEL_OPEN_CONFIRMATION");
+        let encrypted_packet = self.transport.receive_packet().await?;
+        let decrypted_packet = self.decrypt_packet(encrypted_packet)?;
+
+        let message = Message::from_packet(&decrypted_packet)?;
+
+        match message {
+            Message::ChannelOpenConfirmation => {
+                info!("Connected to remote: session started");
+                loop {
+                    let default_username = String::new(); 
+                    let username_string = self.transport.session.username.as_ref().unwrap_or(&default_username);
+                    let username_string = username_string.trim();
+
+                    let prompt = format!("{}@ssh-server$ ", username_string);
+                    print!("{}", prompt);
+                    io::stdout().flush().unwrap(); 
+            
+                    let mut input = String::new();
+                    match io::stdin().read_line(&mut input) {
+                        Ok(_) => {
+                            let trimmed = input.trim();
+                            if trimmed == "exit" || trimmed == "quit" {
+                                println!("Disconnecting");
+                                break;
+                            }
+            
+                            self.send_command_execute(trimmed.to_string()).await?;
+                            let result = self.receive_command_result().await?;
+
+                            println!("{}", result);
+                        }
+                        Err(error) => {
+                            eprintln!("Error reading input: {}", error);
+                            break;
+                        }
+                    }
+                }
+            },
+            _ => {
+                return Err(SshError::Protocol("Expected SSH_MSG_CHANNEL_OPEN_CONFIRMATION message".into()));
             }
         }
 
@@ -1031,7 +1345,10 @@ impl SshStateMachine {
 
         // Decrypt
         let mut decrypted = encrypted_data.to_vec();
-        let mut cipher = Aes128Ctr::new_from_slices(key, iv).map_err(|_| SshError::Protocol("Bad IV or key".into()))?;
+        let mut cipher = 
+            Aes128Ctr::new_from_slices(key, iv).
+            map_err(|_| SshError::Protocol("Bad IV or key".into()))?;
+
         cipher.apply_keystream(&mut decrypted);
 
         let padding_len = decrypted[0] as usize;
