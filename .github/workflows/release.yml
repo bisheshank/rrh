@@ -12,9 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-rust@v1
-        with:
-          rust-version: stable
+      - uses: dtolnay/rust-toolchain@stable
 
       - run: cargo build --release
 
