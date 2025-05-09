@@ -2,6 +2,7 @@ use bytes::{BufMut, BytesMut, Bytes, Buf};
 use log::info;
 use sha1::{Sha1, Digest};
 
+use std::env;
 use core::fmt;
 use tokio::net::TcpStream;
 use std::{io::{self, Write}, process::Command, result, sync::mpsc::channel};
@@ -1061,37 +1062,59 @@ impl SshStateMachine {
         match message {
             Message::ExecuteCommand { command } => {
                 //execute the command
-                let output = Command::new("sh")
-                    .arg("-c")
-                    .arg(&command)
-                    .output();
+                let trimmed = command.trim();
+                let mut is_cd = false;
+                let mut cd_output = "";
 
-                match output {
-                    Ok(output) => {
-                        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                if trimmed.starts_with("cd") {
+                    is_cd = true;
+                    let path = trimmed.strip_prefix("cd ").unwrap().trim();
+                    let result = env::set_current_dir(path);
+                    let error_message = match result {
+                        Ok(_) => None,
+                        Err(e) => Some(format!("Failed to change directory: {}", e)),
+                    };
 
-                        let result = format!(
-                            "{}{}",
-                            stdout,
-                            if !stderr.is_empty() {
-                                format!("\n[stderr]\n{}", stderr)
-                            } else {
-                                "".to_string()
-                            }
-                        );
-
-                        //send this result back to client
-                        self.send_command_result(result).await?;
+                    if error_message != None {
+                        cd_output = "No such file or directory";
                     }
-                    Err(e) => {
-                        let error_message = format!("Failed to execute command: {}", e);
-                        self.send_command_result(error_message).await?;
+                }
+
+                if !is_cd {
+                    let output = Command::new("sh")
+                        .arg("-c")
+                        .arg(&command)
+                        .output();
+
+                    match output {
+                        Ok(output) => {
+                            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+                            let result = format!(
+                                "{}{}",
+                                stdout,
+                                if !stderr.is_empty() {
+                                    format!("\n[stderr]\n{}", stderr)
+                                } else {
+                                    "".to_string()
+                                }
+                            );
+
+                            //send this result back to client
+                            self.send_command_result(result).await?;
+                        }
+                        Err(e) => {
+                            let error_message = format!("Failed to execute command: {}", e);
+                            self.send_command_result(error_message).await?;
+                        }
                     }
+                } else {
+                    self.send_command_result(cd_output.to_string()).await?;
                 }
             },
             _ => {
-                return Err(SshError::Protocol("Expected SSH_MSG_CHANNEL_OPEN message".into()));
+                return Err(SshError::Protocol("Expected EXECUTE_COMMAND message".into()));
             }
         }
 
@@ -1177,7 +1200,7 @@ impl SshStateMachine {
                     let username_string = username_string.trim();
 
                     let prompt = format!("{}@ssh-server$ ", username_string);
-                    print!("{}", prompt);
+                    print!("\x1b[1m{}\x1b[0m", prompt);
                     io::stdout().flush().unwrap(); 
             
                     let mut input = String::new();
@@ -1192,7 +1215,9 @@ impl SshStateMachine {
                             self.send_command_execute(trimmed.to_string()).await?;
                             let result = self.receive_command_result().await?;
 
-                            println!("{}", result);
+                            if result != "" {
+                                println!("{}", result.trim());
+                            }
                         }
                         Err(error) => {
                             eprintln!("Error reading input: {}", error);
